@@ -1,21 +1,22 @@
 import streamlit as st
 from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
+from utils.i18n import t
 
-st.set_page_config(page_title="Schema配置", page_icon="📋")
-st.title("📋 数据库Schema配置")
+st.set_page_config(page_title="Schema Configuration", page_icon="📋")
+st.title(t('database_schema_config'))
 
 config_manager = ConfigManager()
 mcp_client = MCPClient()
 
 # 数据库选择
-database = st.selectbox("选择数据库", ["mysql", "athena"])
+database = st.selectbox(t('select_database'), ["mysql", "athena"])
 
 # 获取数据库配置
 db_config = config_manager.load_database_config().get(database, {})
 
 if not db_config:
-    st.warning(f"请先在数据库配置页面配置{database.upper()}连接信息")
+    st.warning(t('config_db_connection_first').format(db_type=database.upper()))
     st.stop()
 
 # 初始化session state
@@ -35,9 +36,9 @@ if schema_config:
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("表列表")
+    st.subheader(t('table_list'))
     
-    if st.button("刷新Schema"):
+    if st.button(t('refresh_schema')):
         with st.spinner("正在获取表列表..."):
             tables = mcp_client.get_tables(database, db_config)
             if tables:
@@ -47,21 +48,21 @@ with col1:
                 st.error("获取表列表失败，请检查数据库连接")
     
     if st.session_state.tables:
-        selected_table = st.selectbox("选择表", st.session_state.tables)
+        selected_table = st.selectbox(t('select_table'), st.session_state.tables)
     else:
-        st.info("点击'刷新Schema'获取表列表")
+        st.info(t('click_refresh_schema'))
         selected_table = None
 
 with col2:
     if selected_table:
-        st.subheader(f"表详情: {selected_table}")
+        st.subheader(f"{t('table_details')}: {selected_table}")
         
         # 表描述
-        description = st.text_area("表描述", value=st.session_state.table_descriptions.get(selected_table, ""))
+        description = st.text_area(t('table_description'), value=st.session_state.table_descriptions.get(selected_table, ""))
         st.session_state.table_descriptions[selected_table] = description
         
         # 获取表字段
-        if st.button("获取字段信息"):
+        if st.button(t('get_field_info')):
             with st.spinner("正在获取表结构..."):
                 try:
                     # 如果表名与数据库名相同，可能需要特殊处理
@@ -109,7 +110,7 @@ with col2:
         
         # 显示字段列表
         if selected_table in st.session_state.table_fields:
-            st.markdown("**字段列表:**")
+            st.markdown(f"**{t('field_list')}:**")
             fields = st.session_state.table_fields[selected_table]
             
             for i, field in enumerate(fields):
@@ -130,7 +131,7 @@ with col2:
                     
                     # 自定义描述
                     new_desc = st.text_input(
-                        "自定义描述", 
+                        t('custom_description'), 
                         value=field.get("comment", ""), 
                         key=f"desc_{selected_table}_{i}"
                     )
@@ -138,9 +139,9 @@ with col2:
                     if new_desc != field.get("comment", ""):
                         st.session_state.table_fields[selected_table][i]["comment"] = new_desc
         else:
-            st.info("点击'获取字段信息'查看表结构")
+            st.info(t('click_get_field_info'))
     else:
-        st.info("请先选择一个表")
+        st.info(t('select_table_first'))
 
 if st.button("保存配置", type="primary"):
     try:
@@ -157,9 +158,9 @@ if st.button("保存配置", type="primary"):
         st.error(f"保存失败: {str(e)}")
 
 # 显示已保存的配置
-if st.checkbox("显示已保存的Schema配置"):
+if st.checkbox(t('show_saved_schema')):
     saved_config = config_manager.load_schema_config()
     if saved_config:
         st.json(saved_config)
     else:
-        st.info("暂无已保存的配置")
+        st.info(t('no_saved_config'))

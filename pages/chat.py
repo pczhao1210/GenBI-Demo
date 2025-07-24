@@ -4,9 +4,10 @@ import re
 from utils.mcp_client import MCPClient
 from utils.config_manager import ConfigManager
 from utils.llm_client import LLMClient
+from utils.i18n import t
 
-st.set_page_config(page_title="智能聊天", page_icon="💬", layout="wide")
-st.title("💬 智能聊天")
+st.set_page_config(page_title="Smart Chat", page_icon="💬", layout="wide")
+st.title(t('smart_chat'))
 
 # 初始化客户端和配置管理器
 mcp_client = MCPClient()
@@ -22,23 +23,23 @@ if "analysis_question" not in st.session_state:
 
 # 创建边栏
 with st.sidebar:
-    st.header("设置")
+    st.header(t('settings'))
     
     # 数据库选择
-    database_type = st.selectbox("选择数据库", ["mysql", "athena"])
+    database_type = st.selectbox(t('select_database'), ["mysql", "athena"])
     
     # 加载数据库配置
     db_config = config_manager.load_database_config().get(database_type, {})
     if not db_config:
-        st.warning(f"请先在数据库配置页面配置{database_type.upper()}连接信息")
+        st.warning(t('config_db_connection_first').format(db_type=database_type.upper()))
     
     # 加载LLM配置
     llm_config = config_manager.load_llm_config()
     
     # LLM模型选择
-    st.subheader("LLM模型设置")
+    st.subheader(t('llm_model_settings'))
     provider = st.selectbox(
-        "LLM提供商",
+        t('llm_provider'),
         ["openai", "azure_openai", "custom"],
         index=["openai", "azure_openai", "custom"].index(llm_config.get("provider", "openai"))
     )
@@ -46,25 +47,25 @@ with st.sidebar:
     # 显示当前选择的模型
     if provider == "openai":
         model = st.selectbox(
-            "模型",
+            t('model'),
             ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"],
             index=["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"].index(llm_config.get("openai", {}).get("model", "gpt-4"))
         )
-        st.info(f"当前使用: OpenAI - {model}")
+        st.info(f"{t('current_using')}: OpenAI - {model}")
     elif provider == "azure_openai":
         deployment = llm_config.get("azure_openai", {}).get("deployment_name", "")
-        st.info(f"当前使用: Azure OpenAI - {deployment}")
+        st.info(f"{t('current_using')}: Azure OpenAI - {deployment}")
     else:  # custom
         model = llm_config.get("custom", {}).get("model", "llama2")
-        st.info(f"当前使用: 自定义 - {model}")
+        st.info(f"{t('current_using')}: Custom - {model}")
     
     # 其他设置
-    st.subheader("显示设置")
-    show_schema = st.checkbox("显示Schema提示", value=True)
-    use_llm = st.checkbox("使用LLM生成SQL", value=True)
+    st.subheader(t('display_settings'))
+    show_schema = st.checkbox(t('show_schema_prompt'), value=True)
+    use_llm = st.checkbox(t('use_llm_generate_sql'), value=True)
     
-    st.subheader("安全设置")
-    check_dangerous_sql = st.checkbox("避免执行危险代码", value=True)
+    st.subheader(t('security_settings'))
+    check_dangerous_sql = st.checkbox(t('avoid_dangerous_code'), value=True)
     
     # 初始化LLM客户端
     llm_client = LLMClient(llm_config)
@@ -249,7 +250,7 @@ def generate_sql(question, database_type, config_manager, llm_client=None, use_l
     return sql, schema_prompt
 
 # 聊天输入
-if prompt := st.chat_input("请输入您的问题..."):
+if prompt := st.chat_input(t('enter_question')):
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -257,9 +258,9 @@ if prompt := st.chat_input("请输入您的问题..."):
     
     # 生成助手回复
     with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
+        with st.spinner(t('thinking')):
             if not db_config:
-                response = "请先在数据库配置页面配置数据库连接信息"
+                response = t('config_db_connection_first').format(db_type=database_type.upper())
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
             else:
@@ -267,7 +268,7 @@ if prompt := st.chat_input("请输入您的问题..."):
                 schema_info, table_descriptions = get_saved_schema(config_manager, database_type)
                 
                 if not schema_info:
-                    response = f"未找到{database_type.upper()}的Schema配置，请先在Schema配置页面配置表结构"
+                    response = t('config_schema_first').format(db_type=database_type.upper())
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
                 else:
@@ -475,6 +476,6 @@ if prompt := st.chat_input("请输入您的问题..."):
                             st.session_state.messages.append({"role": "assistant", "content": response})
 
 # 清除聊天历史
-if st.button("清除历史"):
+if st.button(t('clear_history')):
     st.session_state.messages = []
     st.rerun()

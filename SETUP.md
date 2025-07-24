@@ -10,7 +10,7 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/GenBI-Demo.git
+git clone https://github.com/pczhao1210/GenBI-Demo.git
 cd GenBI-Demo
 ```
 

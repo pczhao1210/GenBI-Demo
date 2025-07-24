@@ -1,6 +1,16 @@
 #!/bin/bash
 
 # GenBI 一键启动脚本
+# 使用方法: ./start.sh [--language=English]
+
+# 解析命令行参数
+LANGUAGE_ARG=""
+for arg in "$@"; do
+    if [[ $arg == --language=* ]]; then
+        LANGUAGE_ARG="$arg"
+        break
+    fi
+done
 
 echo "🚀 启动 GenBI 生成式BI查询系统..."
 
@@ -30,7 +40,12 @@ sleep 3
 
 # 启动前端服务
 echo "🎨 启动前端Streamlit应用..."
-streamlit run app.py --server.port 8501 &
+if [ -n "$LANGUAGE_ARG" ]; then
+    echo "🌍 使用语言参数: $LANGUAGE_ARG"
+    streamlit run app.py --server.port 8501 -- $LANGUAGE_ARG &
+else
+    streamlit run app.py --server.port 8501 &
+fi
 FRONTEND_PID=$!
 
 echo ""

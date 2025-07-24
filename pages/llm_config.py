@@ -4,9 +4,12 @@ import os
 import time
 from utils.config_manager import ConfigManager
 from utils.llm_client import LLMClient
+from utils.i18n import t, language_selector
 
-st.set_page_config(page_title="LLM配置", page_icon="🤖")
-st.title("🤖 LLM配置")
+st.set_page_config(page_title="LLM Configuration", page_icon="🤖")
+st.title(f"🤖 {t('llm_config')}")
+
+# 全局语言支持 - 不需要在子页面显示选择器
 
 config_manager = ConfigManager()
 
@@ -15,15 +18,15 @@ llm_config = config_manager.load_llm_config()
 
 # LLM提供商选择
 provider = st.selectbox(
-    "选择LLM提供商",
+    t('select_provider'),
     ["openai", "azure_openai", "custom"],
     index=["openai", "azure_openai", "custom"].index(llm_config.get("provider", "openai"))
 )
 
-st.subheader("配置参数")
+st.subheader(t('config_params'))
 
 if provider == "openai":
-    st.markdown("### OpenAI配置")
+    st.markdown(f"### {t('openai_config')}")
     api_key = st.text_input("API Key", value=llm_config.get("openai", {}).get("api_key", ""), type="password")
     base_url = st.text_input("Base URL", value=llm_config.get("openai", {}).get("base_url", "https://api.openai.com/v1"))
     # 获取当前模型
@@ -36,24 +39,24 @@ if provider == "openai":
     except ValueError:
         model_index = 0
     
-    model = st.selectbox("模型", model_options, index=model_index)
+    model = st.selectbox(t('model'), model_options, index=model_index)
     organization = st.text_input("Organization", value=llm_config.get("openai", {}).get("organization", ""))
 
 elif provider == "azure_openai":
-    st.markdown("### Azure OpenAI配置")
+    st.markdown(f"### {t('azure_openai_config')}")
     api_key = st.text_input("API Key", value=llm_config.get("azure_openai", {}).get("api_key", ""), type="password")
     endpoint = st.text_input("Endpoint", value=llm_config.get("azure_openai", {}).get("endpoint", ""))
     api_version = st.text_input("API Version", value=llm_config.get("azure_openai", {}).get("api_version", "2024-02-01"))
     deployment_name = st.text_input("Deployment Name", value=llm_config.get("azure_openai", {}).get("deployment_name", ""))
 
 else:  # custom
-    st.markdown("### 自定义配置")
+    st.markdown(f"### {t('custom_config')}")
     base_url = st.text_input("Base URL", value=llm_config.get("custom", {}).get("base_url", "http://localhost:11434/v1"))
     api_key = st.text_input("API Key", value=llm_config.get("custom", {}).get("api_key", "ollama"), type="password")
-    model = st.text_input("模型名称", value=llm_config.get("custom", {}).get("model", "llama2"))
+    model = st.text_input(t('model_name'), value=llm_config.get("custom", {}).get("model", "llama2"))
 
 # 模型参数
-st.markdown("### 模型参数")
+st.markdown(f"### {t('model_params')}")
 col1, col2, col3 = st.columns(3)
 with col1:
     temperature = st.slider("Temperature", 0.0, 2.0, llm_config.get("parameters", {}).get("temperature", 0.7), 0.1)
@@ -65,8 +68,8 @@ with col3:
 # 按钮操作
 col1, col2 = st.columns(2)
 with col1:
-    if st.button("测试连接", type="secondary"):
-        with st.spinner("测试连接中..."):
+    if st.button(t('test_connection'), type="secondary"):
+        with st.spinner(t('testing_connection')):
             # 创建临时配置进行测试
             test_config = {
                 "provider": provider,
@@ -116,18 +119,18 @@ with col1:
                 elapsed_time = time.time() - start_time
                 
                 if response and "连接测试成功" in response:
-                    st.success(f"连接测试成功！响应时间: {elapsed_time:.2f}秒")
-                    st.info("模型响应:")
-                    st.text_area("响应内容", value=response, height=150, disabled=True, label_visibility="collapsed")
+                    st.success(f"{t('connection_test_success')} {t('response_time')}: {elapsed_time:.2f}s")
+                    st.info(t('model_response'))
+                    st.text_area(t('response_content'), value=response, height=150, disabled=True, label_visibility="collapsed")
                 else:
-                    st.warning("连接成功，但模型响应不符合预期")
-                    st.text_area("响应内容", value=response, height=150, disabled=True, label_visibility="collapsed")
+                    st.warning(t('connection_success_unexpected'))
+                    st.text_area(t('response_content'), value=response, height=150, disabled=True, label_visibility="collapsed")
             except Exception as e:
-                st.error(f"连接测试失败: {str(e)}")
-                st.info("请检查您的配置参数并重试")
+                st.error(f"{t('connection_test_failed')}: {str(e)}")
+                st.info(t('check_config'))
 
 with col2:
-    if st.button("保存配置", type="primary"):
+    if st.button(t('save_config'), type="primary"):
         new_config = {
             "provider": provider,
             "parameters": {
@@ -159,4 +162,4 @@ with col2:
             }
         
         config_manager.save_llm_config(new_config)
-        st.success("配置已保存！")
+        st.success(t('config_saved'))

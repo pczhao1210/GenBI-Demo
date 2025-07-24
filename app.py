@@ -1,41 +1,45 @@
 import streamlit as st
+from utils.i18n import t, language_selector
 
 st.set_page_config(
-    page_title="GenBI - 生成式BI查询系统",
+    page_title="GenBI - Generative BI Query System",
     page_icon="🔍",
     layout="wide"
 )
 
-st.title("🔍 GenBI - 生成式BI查询系统")
-st.markdown("基于大模型的智能数据库查询和分析平台")
+# 设置当前页面为主页
+st.session_state.current_page = 'main'
+
+st.title(f"🔍 {t('app_title')}")
+st.markdown(t('app_subtitle'))
 
 # 侧边栏导航
-st.sidebar.title("导航")
+st.sidebar.title(t('navigation'))
+
+# 语言选择器 (仅在主页显示)
+with st.sidebar:
+    language_selector()
+    st.divider()
+
 pages = {
-    "LLM配置": "pages/llm_config.py",
-    "数据库配置": "pages/database_config.py", 
-    "Schema配置": "pages/schema_config.py",
-    "智能聊天": "pages/chat.py",
-    "MCP管理": "pages/mcp_management.py",
-    "API文档": "pages/api_docs.py"
+    t('llm_config'): "pages/llm_config.py",
+    t('database_config'): "pages/database_config.py", 
+    t('schema_config'): "pages/schema_config.py",
+    t('smart_chat'): "pages/chat.py",
+    t('mcp_management'): "pages/mcp_management.py",
+    t('api_docs'): "pages/api_docs.py"
 }
 
 # 主页内容
-st.markdown("""
-## 功能特性
+st.markdown(f"""
+## {t('features')}
 
-- 🤖 **智能查询**: 自然语言转SQL查询
-- 📊 **数据分析**: AI驱动的数据洞察
-- 🔗 **多数据源**: 支持AWS Athena和MySQL
-- 🛠️ **MCP集成**: 可扩展的工具生态
-- 📋 **API接口**: 完整的RESTful API
+{t('feature_smart_query')}
+{t('feature_data_analysis')}
+{t('feature_multi_source')}
+{t('feature_mcp')}
+{t('feature_api')}
 
-## 快速开始
-
-1. 配置LLM服务 → LLM配置
-2. 连接数据库 → 数据库配置  
-3. 设置表结构 → Schema配置
-4. 开始智能查询 → 智能聊天
-
-请从左侧导航开始配置系统。
+## {t('quick_start')}
+{t('quick_start_content')}
 """)

@@ -1,29 +1,32 @@
 import streamlit as st
 from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
+from utils.i18n import t, language_selector
 
-st.set_page_config(page_title="数据库配置", page_icon="🗄️")
-st.title("🗄️ 数据库配置")
+st.set_page_config(page_title="Database Configuration", page_icon="🗄️")
+st.title(f"🗄️ {t('database_config')}")
+
+# 全局语言支持 - 不需要在子页面显示选择器
 
 config_manager = ConfigManager()
 mcp_client = MCPClient()
 db_config = config_manager.load_database_config()
 
 # 数据库类型选择
-db_type = st.selectbox("选择数据库类型", ["athena", "mysql"])
+db_type = st.selectbox(t('select_database_type'), ["athena", "mysql"])
 
-st.subheader(f"{db_type.upper()}配置")
+st.subheader(t('db_config_header').format(db_type=db_type.upper()))
 
 if db_type == "athena":
     region = st.text_input("AWS Region", value=db_config.get("athena", {}).get("region", "us-east-1"))
-    use_s3_output = st.checkbox("使用S3输出位置", value=False)
+    use_s3_output = st.checkbox(t('use_s3_output'), value=False)
     s3_output = ""
     if use_s3_output:
         s3_output = st.text_input("S3 Output Location", value=db_config.get("athena", {}).get("s3_output_location", ""))
     database = st.text_input("Database", value=db_config.get("athena", {}).get("database", "default"))
     access_key = st.text_input("AWS Access Key", value=db_config.get("athena", {}).get("aws_access_key_id", ""))
     secret_key = st.text_input("AWS Secret Key", value=db_config.get("athena", {}).get("aws_secret_access_key", ""), type="password")
-    max_rows = st.number_input("最大返回行数", min_value=1, max_value=10000, value=db_config.get("athena", {}).get("max_rows", 100))
+    max_rows = st.number_input(t('max_rows'), min_value=1, max_value=10000, value=db_config.get("athena", {}).get("max_rows", 100))
 
 else:  # mysql
     host = st.text_input("Host", value=db_config.get("mysql", {}).get("host", "localhost"))
@@ -31,13 +34,13 @@ else:  # mysql
     database = st.text_input("Database", value=db_config.get("mysql", {}).get("database", ""))
     username = st.text_input("Username", value=db_config.get("mysql", {}).get("username", ""))
     password = st.text_input("Password", value=db_config.get("mysql", {}).get("password", ""), type="password")
-    max_rows = st.number_input("最大返回行数", min_value=1, max_value=10000, value=db_config.get("mysql", {}).get("max_rows", 100))
+    max_rows = st.number_input(t('max_rows'), min_value=1, max_value=10000, value=db_config.get("mysql", {}).get("max_rows", 100))
 
 # 按钮操作
 col1, col2 = st.columns(2)
 with col1:
-    if st.button("测试连接", type="secondary"):
-        with st.spinner("测试连接中..."):
+    if st.button(t('test_connection'), type="secondary"):
+        with st.spinner(t('testing_connection')):
             # 构建测试配置
             if db_type == "athena":
                 test_config = {
@@ -153,7 +156,7 @@ with col1:
                 st.error(f"连接测试出错: {str(e)}")
 
 with col2:
-    if st.button("保存配置", type="primary"):
+    if st.button(t('save_config'), type="primary"):
         if db_type == "athena":
             new_config = {
                 "region": region,
@@ -176,4 +179,4 @@ with col2:
             }
         
         config_manager.save_database_config(db_type, new_config)
-        st.success("配置已保存！")
+        st.success(t('config_saved'))
