@@ -1,0 +1,18 @@
+{
+  "databases": {
+    "mysql": {
+      "host": "localhost",
+      "port": 3306,
+      "database": "your_database",
+      "username": "your_username",
+      "password": "your_password"
+    },
+    "athena": {
+      "region": "us-east-1",
+      "database": "your_database",
+      "s3_output_location": "s3://your-bucket/query-results/",
+      "access_key": "your_access_key",
+      "secret_key": "your_secret_key"
+    }
+  }
+}

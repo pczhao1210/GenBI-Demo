@@ -1,0 +1,27 @@
+{
+  "llm_config": {
+    "provider": "custom",
+    "parameters": {
+      "temperature": 0.3,
+      "max_tokens": 4000,
+      "top_p": 0.9
+    },
+    "openai": {
+      "api_key": "your-openai-api-key",
+      "model": "gpt-4",
+      "base_url": "https://api.openai.com/v1",
+      "organization": ""
+    },
+    "azure_openai": {
+      "api_key": "your-azure-api-key",
+      "endpoint": "https://your-resource.openai.azure.com",
+      "deployment_name": "your-deployment",
+      "api_version": "2024-02-01"
+    },
+    "custom": {
+      "base_url": "https://your-custom-api.com/v1/chat/completions",
+      "api_key": "your-custom-api-key",
+      "model": "your-model-name"
+    }
+  }
+}
