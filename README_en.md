@@ -1,5 +1,7 @@
 # GenBI - Generative BI Query System
 
+English | [中文](README.md)
+
 An intelligent database query and analysis platform based on large language models, supporting natural language to SQL query conversion and intelligent data analysis.
 
 ## Features
