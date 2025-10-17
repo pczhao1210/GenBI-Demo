@@ -53,3 +53,8 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# Test and documentation files
+test/
+*.test.py
+*_test.py

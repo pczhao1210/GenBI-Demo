@@ -31,13 +31,15 @@ if provider == "openai":
     base_url = st.text_input("Base URL", value=llm_config.get("openai", {}).get("base_url", "https://api.openai.com/v1"))
     # 获取当前模型
     current_model = llm_config.get("openai", {}).get("model", "gpt-4")
-    model_options = ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"]
+    model_options = ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo", "gpt-4o", "gpt-4o-mini"]
+    
+    # 兼容性处理：如果当前模型不在选项中，添加到列表并显示警告
+    if current_model not in model_options:
+        model_options.append(current_model)
+        st.warning(f"⚠️ 当前配置的模型 '{current_model}' 可能不是标准模型，建议选择推荐的模型")
     
     # 确定选择索引
-    try:
-        model_index = model_options.index(current_model)
-    except ValueError:
-        model_index = 0
+    model_index = model_options.index(current_model)
     
     model = st.selectbox(t('model'), model_options, index=model_index)
     organization = st.text_input("Organization", value=llm_config.get("openai", {}).get("organization", ""))
@@ -57,13 +59,11 @@ else:  # custom
 
 # 模型参数
 st.markdown(f"### {t('model_params')}")
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 with col1:
     temperature = st.slider("Temperature", 0.0, 2.0, llm_config.get("parameters", {}).get("temperature", 0.7), 0.1)
 with col2:
     max_tokens = st.number_input("Max Tokens", 1, 8000, llm_config.get("parameters", {}).get("max_tokens", 4000))
-with col3:
-    top_p = st.slider("Top P", 0.0, 1.0, llm_config.get("parameters", {}).get("top_p", 0.9), 0.1)
 
 # 按钮操作
 col1, col2 = st.columns(2)
@@ -75,8 +75,7 @@ with col1:
                 "provider": provider,
                 "parameters": {
                     "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_p": top_p
+                    "max_tokens": max_tokens
                 }
             }
             
@@ -135,8 +134,7 @@ with col2:
             "provider": provider,
             "parameters": {
                 "temperature": temperature,
-                "max_tokens": max_tokens,
-                "top_p": top_p
+                "max_tokens": max_tokens
             }
         }
         

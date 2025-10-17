@@ -5,6 +5,49 @@ from utils.mcp_client import MCPClient
 from utils.config_manager import ConfigManager
 from utils.llm_client import LLMClient
 from utils.i18n import t
+from utils.test_question_helper import render_test_question_sidebar, get_test_question_input
+
+def clean_sql_response(sql_text):
+    """清理LLM响应中的SQL，去掉多余的解释内容"""
+    if not sql_text:
+        return sql_text
+    
+    lines = sql_text.strip().split('\n')
+    sql_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行
+        if not line:
+            continue
+            
+        # 跳过明显的解释性文字（中文和英文）
+        if (line.startswith('下面的') or line.startswith('以下') or 
+            line.startswith('This query') or line.startswith('The following') or
+            line.startswith('这个') or line.startswith('该') or
+            '会统计' in line or 'will calculate' in line or
+            '按.*排列' in line or 'ordered by' in line.lower() or
+            line.startswith('注意：') or line.startswith('Note:')):
+            continue
+            
+        # 跳过纯中文解释行（不包含SQL关键字）
+        if (re.match(r'^[^\x00-\x7F，。：；！？（）【】""''、]+[，。：；！？]*$', line) and
+            not any(keyword in line.upper() for keyword in 
+                   ['SELECT', 'FROM', 'WHERE', 'GROUP', 'ORDER', 'INSERT', 'UPDATE', 'DELETE'])):
+            continue
+            
+        # 保留SQL语句行
+        sql_lines.append(line)
+    
+    # 重新组合SQL
+    cleaned_sql = '\n'.join(sql_lines).strip()
+    
+    # 如果清理后为空，返回原文
+    if not cleaned_sql:
+        return sql_text
+        
+    return cleaned_sql
 
 st.set_page_config(page_title="Smart Chat", page_icon="💬", layout="wide")
 st.title(t('smart_chat'))
@@ -46,12 +89,11 @@ with st.sidebar:
     
     # 显示当前选择的模型
     if provider == "openai":
-        model = st.selectbox(
-            t('model'),
-            ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"],
-            index=["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"].index(llm_config.get("openai", {}).get("model", "gpt-4"))
-        )
-        st.info(f"{t('current_using')}: OpenAI - {model}")
+        # 直接使用配置文件中的模型，无需验证
+        current_model = llm_config.get("openai", {}).get("model", "gpt-4")
+        st.info(f"{t('current_using')}: OpenAI - {current_model}")
+        # 将当前模型赋值给model变量，用于后续的API调用
+        model = current_model
     elif provider == "azure_openai":
         deployment = llm_config.get("azure_openai", {}).get("deployment_name", "")
         st.info(f"{t('current_using')}: Azure OpenAI - {deployment}")
@@ -70,12 +112,26 @@ with st.sidebar:
     # 初始化LLM客户端
     llm_client = LLMClient(llm_config)
 
+# 渲染测试问题助手侧边栏
+render_test_question_sidebar()
+
 # 显示聊天历史
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "data" in message:
-            st.dataframe(message["data"])
+            try:
+                # 确保数据类型兼容性
+                df = message["data"]
+                if isinstance(df, pd.DataFrame):
+                    # 转换所有列为字符串以避免类型冲突
+                    df_display = df.astype(str)
+                    st.dataframe(df_display)
+                else:
+                    st.dataframe(df)
+            except Exception as e:
+                st.error(f"数据显示错误: {str(e)}")
+                st.write(message["data"])
 
 # 获取保存的表结构信息
 def get_saved_schema(config_manager, database_type):
@@ -109,18 +165,30 @@ def build_schema_prompt(question, schema_info, table_descriptions):
         else:
             prompt += "表结构信息未配置\n"
     
-    prompt += "\n\n请根据用户问题和数据库schema生成SQL查询。"
+    prompt += "\n\n请根据用户问题和数据库schema生成SQL查询。\n\n重要要求：\n- 只返回可执行的SQL语句\n- 不要包含任何解释说明\n- 不要添加注释或描述\n- 直接返回SQL代码"
     
     return prompt
 
 # 使用LLM进行意图识别
 def identify_intent_with_llm(question, llm_client):
     intent_prompt = f"""请分析以下用户问题的意图，只返回下列之一：
-- query: 查询数据
-- analysis: 数据分析
+- query: 数据查询（包括简单查询、排序查询、筛选查询等）
+- analysis: 复杂的数据分析（如：趋势分析、多维对比分析、统计计算、关联分析等）
 - reject: 涉及数据库增删改操作（INSERT/UPDATE/DELETE/DROP/CREATE/ALTER等）
 
 用户问题: {question}
+
+分类指导：
+- query意图：查询、显示、列出、哪些、前N名、排序、筛选等单表或者多表join的查询需求，包括趋势分析，多维对比等
+- analysis意图：无法从单一query给出问题的答案，需要先进行问题思维链拆分后再逐步进行原因分析，回答'为什么'等复杂分析需求
+- reject意图：任何修改数据的操作
+
+示例：
+- "哪些产品是畅销品" → query（按销量排序查询）
+- "查询产品信息" → query（简单查询）
+- "分析过去6个月的销售趋势变化" → query（趋势分析）
+- "对比不同地区的销售表现" → query（多维对比）
+- "为什么2023年的订单少于2024年" → analysis（需要分析原因）
 
 意图:"""
     
@@ -206,14 +274,19 @@ def check_dangerous_sql_operations(sql):
 
 # SQL生成函数
 def generate_sql(question, database_type, config_manager, llm_client=None, use_llm=False):
+    """使用LLM生成SQL查询"""
     # 获取保存的schema信息
     schema_info, table_descriptions = get_saved_schema(config_manager, database_type)
+    
+    if not schema_info:
+        return None, ""
     
     # 构建包含schema的prompt
     schema_prompt = build_schema_prompt(question, schema_info, table_descriptions)
     
-    # 使用LLM生成SQL
-    sql = ""
+    sql = None
+    
+    # 只有启用LLM且有LLM客户端时才生成SQL
     if use_llm and llm_client:
         try:
             # 调用LLM API生成SQL
@@ -231,26 +304,32 @@ def generate_sql(question, database_type, config_manager, llm_client=None, use_l
                     else:
                         # 如果没有SQL代码块，尝试直接提取
                         sql = llm_response.strip()
+                
+                # 清理SQL：去掉多余的解释内容
+                if sql:
+                    sql = clean_sql_response(sql)
         except Exception as e:
             print(f"LLM生成SQL时出错: {str(e)}")
+            sql = None
     
-    # 如果没有使用LLM或LLM生成失败，使用规则生成SQL
-    if not sql:
-        tables = list(schema_info.keys())
-        for table in tables:
-            if table.lower() in question.lower():
-                sql = f"SELECT * FROM {table} LIMIT 10"
-                break
-        
-        if not sql and ("查询" in question or "显示" in question or "select" in question.lower()):
-            if tables:
-                sql = f"SELECT * FROM {tables[0]} LIMIT 10"
+    # 返回生成的SQL和包含schema的prompt
+    return sql, schema_prompt
     
     # 返回生成的SQL和包含schema的prompt
     return sql, schema_prompt
 
+# 检查是否有测试问题输入
+test_question = get_test_question_input()
+if test_question:
+    prompt = test_question
+else:
+    prompt = None
+
 # 聊天输入
-if prompt := st.chat_input(t('enter_question')):
+if not prompt:
+    prompt = st.chat_input(t('enter_question'))
+
+if prompt:
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -341,13 +420,19 @@ if prompt := st.chat_input(t('enter_question')):
                                         rows = query_result["result"]["data"].get("rows", [])
                                         
                                         if rows:
-                                            df = pd.DataFrame(rows, columns=columns)
-                                            st.dataframe(df)
-                                            st.session_state.messages.append({
-                                                "role": "assistant", 
-                                                "content": response,
-                                                "data": df
-                                            })
+                                            try:
+                                                df = pd.DataFrame(rows, columns=columns)
+                                                # 转换所有列为字符串以避免类型冲突
+                                                df_display = df.astype(str)
+                                                st.dataframe(df_display)
+                                                st.session_state.messages.append({
+                                                    "role": "assistant", 
+                                                    "content": response,
+                                                    "data": df_display
+                                                })
+                                            except Exception as e:
+                                                st.error(f"数据显示错误: {str(e)}")
+                                                st.write("原始数据:", rows)
                                         else:
                                             st.info("查询结果为空")
                                             st.session_state.messages.append({"role": "assistant", "content": response + "\n\n查询结果为空"})
@@ -419,10 +504,6 @@ if prompt := st.chat_input(t('enter_question')):
                                 else:  # custom
                                     response_parts.append(f"LLM: 自定义 - {llm_config.get('custom', {}).get('model', 'llama2')}")
                             
-                            # 根据设置显示Schema提示
-                            if show_schema:
-                                response_parts.append(f"数据库Schema提示:\n```\n{schema_prompt}\n```")
-                            
                             # 添加SQL - 使用更安全的格式化方式
                             response_parts.append(f"SQL: ")  # 先添加标签
                             response_parts.append(f"```sql")  # 单独一行开始代码块
@@ -437,6 +518,11 @@ if prompt := st.chat_input(t('enter_question')):
                                 # 如果markdown渲染失败，尝试使用纯文本显示
                                 st.text(f"Markdown渲染失败，以下是原始响应:\n{response}")
                                 st.error(f"渲染错误: {str(e)}")
+                            
+                            # 根据设置显示Schema提示（使用可折叠的expander）
+                            if show_schema:
+                                with st.expander("📋 数据库Schema提示", expanded=False):
+                                    st.markdown(f"```\n{schema_prompt}\n```")
                             
                             # 执行查询
                             with st.spinner("执行查询中..."):
@@ -456,13 +542,19 @@ if prompt := st.chat_input(t('enter_question')):
                                     rows = query_result["result"]["data"].get("rows", [])
                                     
                                     if rows:
-                                        df = pd.DataFrame(rows, columns=columns)
-                                        st.dataframe(df)
-                                        st.session_state.messages.append({
-                                            "role": "assistant", 
-                                            "content": response,
-                                            "data": df
-                                        })
+                                        try:
+                                            df = pd.DataFrame(rows, columns=columns)
+                                            # 转换所有列为字符串以避免类型冲突
+                                            df_display = df.astype(str)
+                                            st.dataframe(df_display)
+                                            st.session_state.messages.append({
+                                                "role": "assistant", 
+                                                "content": response,
+                                                "data": df_display
+                                            })
+                                        except Exception as e:
+                                            st.error(f"数据显示错误: {str(e)}")
+                                            st.write("原始数据:", rows)
                                     else:
                                         st.info("查询结果为空")
                                         st.session_state.messages.append({"role": "assistant", "content": response + "\n\n查询结果为空"})
@@ -470,8 +562,41 @@ if prompt := st.chat_input(t('enter_question')):
                                     st.warning("查询结果格式不正确")
                                     st.session_state.messages.append({"role": "assistant", "content": response + "\n\n查询结果格式不正确"})
                         else:
+                            # SQL生成失败的处理
                             tables = list(schema_info.keys())
-                            response = f"我无法理解您的查询意图。请尝试以下格式:\n- 查询[表名]\n- 显示[表名]的数据\n\n可用的表: {', '.join(tables)}"
+                            
+                            if use_llm:
+                                # 已启用LLM但生成失败
+                                response = f"""很抱歉，LLM未能为您的问题生成SQL查询。
+
+**您的问题**: {prompt}
+
+**可能的原因**:
+1. 问题描述过于复杂或模糊
+2. LLM服务暂时不可用
+3. 问题超出了当前数据库结构的支持范围
+
+**建议**:
+- 尝试将问题表述得更具体和明确
+- 检查LLM配置是否正确
+- 参考可用的表结构调整问题
+
+**可用的表**: {', '.join(tables)}
+
+请重新组织您的问题，或联系管理员检查LLM配置。"""
+                            else:
+                                # 未启用LLM
+                                response = f"""为了回答您的问题 "{prompt}"，需要启用LLM功能。
+
+**启用步骤**:
+1. 在页面顶部勾选"使用LLM进行SQL生成"
+2. 确保LLM配置正确（在LLM配置页面设置）
+3. 重新提问
+
+**可用的表**: {', '.join(tables)}
+
+**说明**: 系统现在仅支持通过LLM生成SQL查询，不再提供基于规则的简单查询功能。"""
+                            
                             st.markdown(response)
                             st.session_state.messages.append({"role": "assistant", "content": response})
 

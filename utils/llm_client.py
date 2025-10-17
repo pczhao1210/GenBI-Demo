@@ -49,6 +49,10 @@ class LLMClient:
         elif self.provider == "openai_sdk":
             return self._call_openai_sdk(prompt)
         return None
+    
+    def generate_response(self, prompt: str) -> Optional[str]:
+        """生成LLM响应"""
+        return self.generate_sql(prompt)
         
     def _call_openai_sdk(self, prompt: str) -> Optional[str]:
         """使用OpenAI SDK调用API"""
@@ -64,13 +68,20 @@ class LLMClient:
                 openai.base_url = openai_config.get("base_url")
                 
             # 调用API
-            response = openai.chat.completions.create(
-                model=openai_config.get("model", "gpt-3.5-turbo"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=params.get("temperature", 0.7),
-                max_tokens=params.get("max_tokens", 4000),
-                top_p=params.get("top_p", 0.9)
-            )
+            api_params = {
+                "model": openai_config.get("model", "gpt-3.5-turbo"),
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            
+            # 添加可选参数
+            if params.get("temperature") is not None:
+                api_params["temperature"] = params.get("temperature", 0.7)
+            if params.get("max_tokens") is not None:
+                api_params["max_tokens"] = params.get("max_tokens", 4000)
+            if params.get("top_p") is not None:
+                api_params["top_p"] = params.get("top_p", 0.9)
+            
+            response = openai.chat.completions.create(**api_params)
             
             return response.choices[0].message.content.strip()
         except Exception as e:
@@ -93,24 +104,57 @@ class LLMClient:
             
             data = {
                 "model": openai_config.get("model", "gpt-3.5-turbo"),
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": params.get("temperature", 0.7),
-                "max_tokens": params.get("max_tokens", 4000),
-                "top_p": params.get("top_p", 0.9)
+                "messages": [{"role": "user", "content": prompt}]
             }
+            
+            # 添加可选参数
+            if params.get("temperature") is not None:
+                data["temperature"] = params.get("temperature", 0.7)
+            if params.get("max_tokens") is not None:
+                data["max_tokens"] = params.get("max_tokens", 4000)
+            if params.get("top_p") is not None:
+                data["top_p"] = params.get("top_p", 0.9)
             
             response = requests.post(
                 f"{openai_config.get('base_url', 'https://api.openai.com/v1')}/chat/completions",
                 headers=headers,
-                json=data
+                json=data,
+                timeout=30  # 添加超时设置
             )
             
+            # 检查响应状态码
             if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"].strip()
+                # 检查响应内容是否为空
+                if not response.text.strip():
+                    print(f"OpenAI API返回空响应")
+                    return None
+                
+                try:
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        content = result["choices"][0]["message"]["content"]
+                        return content.strip() if content else None
+                    else:
+                        print(f"OpenAI API响应格式错误: 缺少choices字段")
+                        return None
+                except json.JSONDecodeError as json_error:
+                    print(f"OpenAI API响应JSON解析失败: {json_error}")
+                    print(f"原始响应内容: {response.text[:500]}...")  # 只显示前500字符
+                    return None
             else:
-                print(f"OpenAI API错误: {response.status_code} - {response.text}")
+                print(f"OpenAI API错误: {response.status_code}")
+                try:
+                    error_detail = response.json()
+                    print(f"错误详情: {error_detail}")
+                except:
+                    print(f"错误响应(非JSON): {response.text}")
                 return None
+        except requests.exceptions.Timeout:
+            print(f"调用OpenAI API超时")
+            return None
+        except requests.exceptions.ConnectionError:
+            print(f"连接OpenAI API失败")
+            return None
         except Exception as e:
             print(f"调用OpenAI API时出错: {str(e)}")
             return None
@@ -127,11 +171,16 @@ class LLMClient:
             }
             
             data = {
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": params.get("temperature", 0.7),
-                "max_tokens": params.get("max_tokens", 4000),
-                "top_p": params.get("top_p", 0.9)
+                "messages": [{"role": "user", "content": prompt}]
             }
+            
+            # 添加可选参数
+            if params.get("temperature") is not None:
+                data["temperature"] = params.get("temperature", 0.7)
+            if params.get("max_tokens") is not None:
+                data["max_tokens"] = params.get("max_tokens", 4000)
+            if params.get("top_p") is not None:
+                data["top_p"] = params.get("top_p", 0.9)
             
             endpoint = azure_config.get("endpoint", "").rstrip("/")
             deployment = azure_config.get("deployment_name")
@@ -139,14 +188,41 @@ class LLMClient:
             
             url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
             
-            response = requests.post(url, headers=headers, json=data)
+            response = requests.post(url, headers=headers, json=data, timeout=30)
             
+            # 检查响应状态码
             if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"].strip()
+                # 检查响应内容是否为空
+                if not response.text.strip():
+                    print(f"Azure OpenAI API返回空响应")
+                    return None
+                
+                try:
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        content = result["choices"][0]["message"]["content"]
+                        return content.strip() if content else None
+                    else:
+                        print(f"Azure OpenAI API响应格式错误: 缺少choices字段")
+                        return None
+                except json.JSONDecodeError as json_error:
+                    print(f"Azure OpenAI API响应JSON解析失败: {json_error}")
+                    print(f"原始响应内容: {response.text[:500]}...")
+                    return None
             else:
-                print(f"Azure OpenAI API错误: {response.status_code} - {response.text}")
+                print(f"Azure OpenAI API错误: {response.status_code}")
+                try:
+                    error_detail = response.json()
+                    print(f"错误详情: {error_detail}")
+                except:
+                    print(f"错误响应(非JSON): {response.text}")
                 return None
+        except requests.exceptions.Timeout:
+            print(f"调用Azure OpenAI API超时")
+            return None
+        except requests.exceptions.ConnectionError:
+            print(f"连接Azure OpenAI API失败")
+            return None
         except Exception as e:
             print(f"调用Azure OpenAI API时出错: {str(e)}")
             return None
@@ -179,11 +255,16 @@ class LLMClient:
             if request_format == "openai":
                 data = {
                     "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": params.get("temperature", 0.7),
-                    "max_tokens": params.get("max_tokens", 4000),
-                    "top_p": params.get("top_p", 0.9)
+                    "messages": [{"role": "user", "content": prompt}]
                 }
+                
+                # 添加可选参数
+                if params.get("temperature") is not None:
+                    data["temperature"] = params.get("temperature", 0.7)
+                if params.get("max_tokens") is not None:
+                    data["max_tokens"] = params.get("max_tokens", 4000)
+                if params.get("top_p") is not None:
+                    data["top_p"] = params.get("top_p", 0.9)
             else:
                 # 自定义请求格式
                 data = custom_config.get("request_template", {})

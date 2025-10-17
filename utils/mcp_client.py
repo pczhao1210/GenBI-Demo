@@ -17,8 +17,12 @@ class MCPClient:
                 "params": params or {}
             }
             
-            # 获取服务器路径
-            server_path = os.path.join("mcp_servers", f"{server_type}_server.py")
+            # 获取服务器路径 - 优先使用标准版本（已优化）
+            use_optimized = params.get("use_optimized", False) if params else False
+            if use_optimized and os.path.exists(os.path.join("mcp_servers", f"{server_type}_server_optimized.py")):
+                server_path = os.path.join("mcp_servers", f"{server_type}_server_optimized.py")
+            else:
+                server_path = os.path.join("mcp_servers", f"{server_type}_server.py")
             
             # 启动进程
             process = subprocess.Popen(
@@ -55,8 +59,12 @@ class MCPClient:
             "params": full_params
         }
         
-        # 获取服务器路径
-        server_path = os.path.join("mcp_servers", f"{server_type}_server.py")
+        # 获取服务器路径 - 优先使用标准版本（已优化）
+        use_optimized = config.get("use_optimized", False)
+        if use_optimized and os.path.exists(os.path.join("mcp_servers", f"{server_type}_server_optimized.py")):
+            server_path = os.path.join("mcp_servers", f"{server_type}_server_optimized.py")
+        else:
+            server_path = os.path.join("mcp_servers", f"{server_type}_server.py")
         
         try:
             # 启动进程
