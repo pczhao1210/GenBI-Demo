@@ -39,6 +39,15 @@ class ConfigManager:
     
     def load_mcp_config(self) -> Dict[str, Any]:
         config = self._load_config("mcp_config.json")
+        
+        # 如果配置为空，尝试从示例配置初始化
+        if not config.get("mcp_servers"):
+            example_config = self._load_config("example_mcp_config.json")
+            if example_config.get("mcp_servers"):
+                # 复制示例配置到实际配置
+                self.save_mcp_config(example_config["mcp_servers"])
+                config = example_config
+        
         return config.get("mcp_servers", {})
     
     def save_mcp_config(self, config: Dict[str, Any]):

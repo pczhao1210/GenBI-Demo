@@ -150,6 +150,22 @@ TRANSLATIONS = {
         "custom_config": "自定义配置",
         "model_name": "模型名称",
         "db_config_header": "{db_type}配置",
+        
+        # Timeout configuration
+        "timeout_config": "超时配置",
+        "timeout_config_help": "配置不同类型请求的超时时间，提高系统稳定性",
+        "timeout_mode": "超时模式",
+        "timeout_mode_help": "选择超时配置模式：自动智能、全局统一、或按意图分类",
+        "auto_timeout_description": "系统将根据意图智能设置超时时间（查询意图70秒，分析意图240秒）",
+        "global_timeout_seconds": "全局超时时间（秒）",
+        "global_timeout_help": "所有请求使用统一的超时时间",
+        "intent_timeout_settings": "按意图分类超时设置",
+        "query_intent_timeout": "查询意图（秒）",
+        "query_intent_help": "SQL查询生成、数据检索等查询类操作的超时时间",
+        "analysis_intent_timeout": "分析意图（秒）",
+        "analysis_intent_help": "意图识别、分析计划生成、复杂分析等分析类操作的超时时间",
+        "default_timeout": "默认超时（秒）",
+        "default_timeout_help": "未分类请求的默认超时时间",
     },
     "en": {
         # Main app
@@ -198,6 +214,22 @@ Please start configuring the system from the left navigation.
         "check_config": "Please check your configuration parameters and try again",
         "select_database_type": "Select Database Type",
         "max_rows": "Maximum Rows",
+        
+        # Timeout configuration
+        "timeout_config": "Timeout Configuration",
+        "timeout_config_help": "Configure timeout settings for different types of requests to improve system stability",
+        "timeout_mode": "Timeout Mode",
+        "timeout_mode_help": "Choose timeout configuration mode: Auto intelligence, Global unified, or Intent classified",
+        "auto_timeout_description": "System will intelligently set timeout based on intent (Query intent 70s, Analysis intent 240s)",
+        "global_timeout_seconds": "Global Timeout (seconds)",
+        "global_timeout_help": "Use unified timeout for all requests",
+        "intent_timeout_settings": "Intent-Based Timeout Settings",
+        "query_intent_timeout": "Query Intent (seconds)",
+        "query_intent_help": "Timeout for SQL query generation, data retrieval and other query operations",
+        "analysis_intent_timeout": "Analysis Intent (seconds)",
+        "analysis_intent_help": "Timeout for intent recognition, analysis plan generation and complex analysis operations",
+        "default_timeout": "Default Timeout (seconds)",
+        "default_timeout_help": "Default timeout for unclassified requests",
         "use_s3_output": "Use S3 Output Location",
         
         # API Docs

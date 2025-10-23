@@ -6,6 +6,11 @@
       "max_tokens": 4000,
       "top_p": 0.9
     },
+    "timeout": {
+      "query": 70,
+      "analysis": 240,
+      "default": 70
+    },
     "openai": {
       "api_key": "your-openai-api-key",
       "model": "gpt-4",

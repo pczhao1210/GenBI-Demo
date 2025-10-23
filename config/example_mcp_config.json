@@ -1,0 +1,28 @@
+{
+  "mcp_servers": {
+    "athena": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp_servers/athena_server.py"],
+      "status": "inactive",
+      "description": "AWS Athena数据库查询服务",
+      "capabilities": ["database_query", "sql_execution", "data_analysis"]
+    },
+    "mysql": {
+      "type": "stdio", 
+      "command": "python",
+      "args": ["mcp_servers/mysql_server.py"],
+      "status": "inactive",
+      "description": "MySQL数据库查询服务",
+      "capabilities": ["database_query", "sql_execution", "connection_pool"]
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "python", 
+      "args": ["mcp_servers/playwright_server.py"],
+      "status": "inactive",
+      "description": "网页数据抓取服务",
+      "capabilities": ["web_scraping", "external_data", "automation"]
+    }
+  }
+}

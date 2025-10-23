@@ -7,6 +7,7 @@ class MCPClient:
     def __init__(self):
         self.processes = {}
         self.server_instances = {}
+        self._server_info_cache = {}  # 缓存服务器信息
     
     def call_mcp_server(self, server_type: str, method: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         """调用MCP服务器"""
@@ -24,9 +25,13 @@ class MCPClient:
             else:
                 server_path = os.path.join("mcp_servers", f"{server_type}_server.py")
             
-            # 启动进程
+            # 启动进程 - 使用虚拟环境中的Python
+            python_path = "/home/azureuser/Playground/GenBI-Demo/.venv/bin/python"
+            if not os.path.exists(python_path):
+                python_path = "python"  # 回退到系统Python
+                
             process = subprocess.Popen(
-                ["python", server_path],
+                [python_path, server_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -110,3 +115,43 @@ class MCPClient:
         if "result" in result and isinstance(result["result"], dict) and "success" in result["result"] and result["result"]["success"]:
             return result["result"].get("columns", [])
         return []
+    
+    def get_server_info(self, server_type: str) -> Dict[str, Any]:
+        """获取MCP服务器信息"""
+        # 检查缓存
+        if server_type in self._server_info_cache:
+            return self._server_info_cache[server_type]
+        
+        # 调用服务器获取信息
+        result = self.call_mcp_server(server_type, "get_server_info")
+        
+        if "result" in result:
+            # 缓存结果
+            self._server_info_cache[server_type] = result["result"]
+            return result["result"]
+        
+        return {"error": f"无法获取服务器 {server_type} 的信息"}
+    
+    def discover_available_servers(self) -> Dict[str, Dict[str, Any]]:
+        """发现可用的MCP服务器"""
+        import os
+        server_info = {}
+        
+        # 扫描mcp_servers目录
+        mcp_servers_dir = "mcp_servers"
+        if os.path.exists(mcp_servers_dir):
+            for file in os.listdir(mcp_servers_dir):
+                if file.endswith("_server.py") and not file.startswith("__"):
+                    server_name = file.replace("_server.py", "")
+                    try:
+                        info = self.get_server_info(server_name)
+                        if "error" not in info:
+                            server_info[server_name] = info
+                    except Exception as e:
+                        server_info[server_name] = {
+                            "name": server_name,
+                            "error": f"无法获取服务器信息: {str(e)}",
+                            "status": "unavailable"
+                        }
+        
+        return server_info

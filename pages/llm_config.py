@@ -48,8 +48,8 @@ elif provider == "azure_openai":
     st.markdown(f"### {t('azure_openai_config')}")
     api_key = st.text_input("API Key", value=llm_config.get("azure_openai", {}).get("api_key", ""), type="password")
     endpoint = st.text_input("Endpoint", value=llm_config.get("azure_openai", {}).get("endpoint", ""))
-    api_version = st.text_input("API Version", value=llm_config.get("azure_openai", {}).get("api_version", "2024-02-01"))
-    deployment_name = st.text_input("Deployment Name", value=llm_config.get("azure_openai", {}).get("deployment_name", ""))
+    st.info("💡 使用v1 endpoint格式时不需要API Version参数")
+    deployment_name = st.text_input("Deployment Name/Model", value=llm_config.get("azure_openai", {}).get("deployment_name", ""))
 
 else:  # custom
     st.markdown(f"### {t('custom_config')}")
@@ -64,6 +64,69 @@ with col1:
     temperature = st.slider("Temperature", 0.0, 2.0, llm_config.get("parameters", {}).get("temperature", 0.7), 0.1)
 with col2:
     max_tokens = st.number_input("Max Tokens", 1, 8000, llm_config.get("parameters", {}).get("max_tokens", 4000))
+
+# 超时配置
+st.markdown(f"### ⏱️ {t('timeout_config')}")
+st.info("💡 " + t('timeout_config_help'))
+
+# 获取当前超时配置
+current_timeout = llm_config.get("timeout", {})
+
+# 超时配置模式选择
+timeout_mode = st.selectbox(
+    t('timeout_mode'),
+    ["auto", "global", "intent"],
+    index=0 if not current_timeout else (1 if isinstance(current_timeout, int) else 2),
+    help=t('timeout_mode_help')
+)
+
+if timeout_mode == "auto":
+    st.success(f"✅ {t('auto_timeout_description')}")
+    timeout_config = {}
+elif timeout_mode == "global":
+    global_timeout = st.number_input(
+        t('global_timeout_seconds'), 
+        value=current_timeout if isinstance(current_timeout, int) else 70,
+        min_value=10, 
+        max_value=600,
+        help=t('global_timeout_help')
+    )
+    timeout_config = global_timeout
+else:  # intent
+    st.markdown(f"#### {t('intent_timeout_settings')}")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        query_timeout = st.number_input(
+            t('query_intent_timeout'), 
+            value=current_timeout.get("query", 70) if isinstance(current_timeout, dict) else 70,
+            min_value=10, 
+            max_value=300,
+            help=t('query_intent_help')
+        )
+    
+    with col2:
+        analysis_timeout = st.number_input(
+            t('analysis_intent_timeout'), 
+            value=current_timeout.get("analysis", 240) if isinstance(current_timeout, dict) else 240,
+            min_value=30, 
+            max_value=600,
+            help=t('analysis_intent_help')
+        )
+    
+    default_timeout = st.number_input(
+        t('default_timeout'), 
+        value=current_timeout.get("default", 70) if isinstance(current_timeout, dict) else 70,
+        min_value=10, 
+        max_value=300,
+        help=t('default_timeout_help')
+    )
+    
+    timeout_config = {
+        "query": query_timeout,
+        "analysis": analysis_timeout,
+        "default": default_timeout
+    }
 
 # 按钮操作
 col1, col2 = st.columns(2)
@@ -91,7 +154,6 @@ with col1:
                 test_config["azure_openai"] = {
                     "api_key": api_key,
                     "endpoint": endpoint,
-                    "api_version": api_version,
                     "deployment_name": deployment_name
                 }
             else:  # custom
@@ -138,6 +200,10 @@ with col2:
             }
         }
         
+        # 添加超时配置
+        if timeout_config:
+            new_config["timeout"] = timeout_config
+        
         if provider == "openai":
             new_config["openai"] = {
                 "api_key": api_key,
@@ -149,7 +215,6 @@ with col2:
             new_config["azure_openai"] = {
                 "api_key": api_key,
                 "endpoint": endpoint,
-                "api_version": api_version,
                 "deployment_name": deployment_name
             }
         else:  # custom

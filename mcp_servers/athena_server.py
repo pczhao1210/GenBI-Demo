@@ -385,28 +385,52 @@ class AthenaServer:
 
 def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """处理MCP请求"""
-    server = AthenaServer()
-    
     method = request.get("method")
     params = request.get("params", {})
     
-    # 如果请求中包含配置信息，先初始化服务器
-    if "config" in params:
-        server.initialize(params.get("config", {}))
+    if method == "get_server_info":
+        # 返回服务器信息
+        return {
+            "result": {
+                "name": "athena",
+                "description": "AWS Athena数据库查询服务",
+                "capabilities": ["database_query", "sql_execution", "data_analysis"],
+                "type": "stdio",
+                "version": "1.0.0",
+                "methods": ["initialize", "execute_query", "get_tables", "describe_table"],
+                "status": "ready"
+            }
+        }
     
-    if method == "initialize":
-        return {"result": {"success": True, "message": "Athena服务器初始化成功"}}
+    elif method == "initialize":
+        server = AthenaServer()
+        config = params.get("config", {})
+        server.initialize(config)
+        
+        return {"success": True, "initialized": True}
     
     elif method == "execute_query":
+        server = AthenaServer()
+        config = params.get("config", {})
+        server.initialize(config)
+        
         return {"result": server.execute_query(
-            params.get("sql"),
-            params.get("database")
+            params.get("sql"), 
+            params.get("database", "default")
         )}
     
     elif method == "get_tables":
+        server = AthenaServer()
+        config = params.get("config", {})
+        server.initialize(config)
+        
         return {"result": server.get_tables(params.get("database", "default"))}
     
     elif method == "describe_table":
+        server = AthenaServer()
+        config = params.get("config", {})
+        server.initialize(config)
+        
         return {"result": server.describe_table(
             params.get("table_name"),
             params.get("database", "default")

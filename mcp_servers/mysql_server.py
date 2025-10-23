@@ -400,10 +400,24 @@ class MySQLServerOptimized:
 
 def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """处理MCP请求"""
-    server = MySQLServerOptimized()
-    
     method = request.get("method")
     params = request.get("params", {})
+    
+    if method == "get_server_info":
+        # 返回服务器信息
+        return {
+            "result": {
+                "name": "mysql",
+                "description": "MySQL数据库查询服务",
+                "capabilities": ["database_query", "sql_execution", "connection_pool", "transaction_management"],
+                "type": "stdio",
+                "version": "1.0.0",
+                "methods": ["initialize", "execute_query", "get_tables", "describe_table", "get_database_stats"],
+                "status": "ready"
+            }
+        }
+    
+    server = MySQLServerOptimized()
     
     # 如果请求中包含配置信息，先初始化服务器
     if "config" in params:

@@ -38,27 +38,95 @@ class LLMClient:
             
         self.provider = self.config.get("provider", "openai")
     
-    def generate_sql(self, prompt: str) -> Optional[str]:
+    def _get_timeout_by_request_type(self, prompt: str) -> int:
+        """根据意图分类确定超时时间"""
+        # 从全局LLM配置中获取超时设置
+        timeout_config = self.config.get("timeout", {})
+        
+        if isinstance(timeout_config, int):
+            # 如果timeout是单个数字，直接返回
+            return timeout_config
+        elif isinstance(timeout_config, dict):
+            # 如果timeout是字典，根据意图分类返回
+            intent_type = self._classify_intent_type(prompt)
+            return timeout_config.get(intent_type, timeout_config.get("default", 70))
+        else:
+            # 默认按意图分类设置超时时间
+            intent_type = self._classify_intent_type(prompt)
+            # 默认超时时间映射
+            default_timeout_map = {
+                "query": 70,       # 查询意图：70秒
+                "analysis": 240,   # 分析意图：240秒
+            }
+            return default_timeout_map.get(intent_type, 70)
+    
+    def _classify_intent_type(self, prompt: str) -> str:
+        """根据提示内容分类意图类型"""
+        # 如果提示中包含意图类型标记，直接提取
+        if "[INTENT_TYPE:" in prompt:
+            start = prompt.find("[INTENT_TYPE:") + 13
+            end = prompt.find("]", start)
+            if end != -1:
+                return prompt[start:end].strip()
+        
+        prompt_lower = prompt.lower()
+        
+        # 分析意图关键词
+        analysis_keywords = [
+            "分析", "analysis", "意图识别", "identify_intent", "生成分析计划", 
+            "generate_analysis_plan", "执行分析计划", "execute_analysis_plan",
+            "复杂", "complex", "深度分析", "统计分析", "数据挖掘", "机器学习"
+        ]
+        
+        # 检查分析意图关键词
+        if any(keyword in prompt_lower for keyword in analysis_keywords):
+            return "analysis"
+            
+        # 默认为查询意图
+        return "query"
+    
+    def generate_sql(self, prompt: str, request_type: Optional[str] = None, tools: List[Dict] = None) -> Optional[str]:
         """根据提示生成SQL查询"""
         if self.provider == "openai":
-            return self._call_openai(prompt)
+            return self._call_openai(prompt, request_type)
         elif self.provider == "azure_openai":
-            return self._call_azure_openai(prompt)
+            return self._call_azure_openai(prompt, request_type)
         elif self.provider == "custom":
-            return self._call_custom(prompt)
+            return self._call_custom(prompt, request_type)
         elif self.provider == "openai_sdk":
-            return self._call_openai_sdk(prompt)
+            return self._call_openai_sdk(prompt, request_type, tools)
         return None
     
-    def generate_response(self, prompt: str) -> Optional[str]:
-        """生成LLM响应"""
-        return self.generate_sql(prompt)
+    def generate_response(self, prompt: str, request_type: Optional[str] = None, tools: List[Dict] = None) -> Optional[str]:
+        """生成LLM响应，支持工具调用"""
+        return self.generate_sql(prompt, request_type, tools)
+    
+    def generate_response_with_tools(self, messages: List[Dict], tools: List[Dict] = None) -> Dict[str, Any]:
+        """生成支持工具调用的响应"""
+        if self.provider == "openai_sdk":
+            return self._call_openai_sdk_with_tools(messages, tools)
+        else:
+            # 其他provider暂不支持工具调用，回退到普通模式
+            last_message = messages[-1] if messages else {"content": ""}
+            response = self.generate_response(last_message.get("content", ""))
+            return {
+                "content": response,
+                "tool_calls": None
+            }
         
-    def _call_openai_sdk(self, prompt: str) -> Optional[str]:
+    def _call_openai_sdk(self, prompt: str, request_type: Optional[str] = None) -> Optional[str]:
         """使用OpenAI SDK调用API"""
         try:
             openai_config = self.config.get("openai", {})
             params = self.config.get("parameters", {})
+            
+            # 获取动态超时时间
+            if request_type:
+                # 临时设置意图类型用于超时计算
+                temp_prompt = f"[INTENT_TYPE:{request_type}] {prompt}"
+                timeout_seconds = self._get_timeout_by_request_type(temp_prompt)
+            else:
+                timeout_seconds = self._get_timeout_by_request_type(prompt)
             
             # 设置OpenAI SDK的配置
             openai.api_key = openai_config.get("api_key")
@@ -73,12 +141,34 @@ class LLMClient:
                 "messages": [{"role": "user", "content": prompt}]
             }
             
-            # 添加可选参数
-            if params.get("temperature") is not None:
-                api_params["temperature"] = params.get("temperature", 0.7)
+            # 处理模型参数兼容性
+            model_name = openai_config.get("model", "gpt-3.5-turbo").lower()
+            
+            # 检测是否为新一代模型（o1系列、gpt-5系列等）
+            is_new_generation_model = any(x in model_name for x in ["o1-", "gpt-5", "gpt-5-mini"])
+            # 检测是否为较新的模型（gpt-4o等）
+            is_newer_model = any(x in model_name for x in ["gpt-4o", "gpt-4-turbo"])
+            
+            # 对于新一代模型，只使用基本参数
+            if is_new_generation_model:
+                # o1系列和gpt-5系列等模型只支持默认参数，不添加temperature等
+                pass
+            else:
+                # 其他模型可以使用temperature参数
+                if params.get("temperature") is not None:
+                    api_params["temperature"] = params.get("temperature", 0.7)
+            
+            # 处理max_tokens参数兼容性
             if params.get("max_tokens") is not None:
-                api_params["max_tokens"] = params.get("max_tokens", 4000)
-            if params.get("top_p") is not None:
+                if is_newer_model or is_new_generation_model:
+                    # 新模型使用max_completion_tokens
+                    api_params["max_completion_tokens"] = params.get("max_tokens", 4000)
+                else:
+                    # 旧模型使用max_tokens
+                    api_params["max_tokens"] = params.get("max_tokens", 4000)
+            
+            if params.get("top_p") is not None and not is_new_generation_model:
+                # 新一代模型可能也不支持top_p参数
                 api_params["top_p"] = params.get("top_p", 0.9)
             
             response = openai.chat.completions.create(**api_params)
@@ -88,11 +178,19 @@ class LLMClient:
             print(f"使用OpenAI SDK调用API时出错: {str(e)}")
             return None
     
-    def _call_openai(self, prompt: str) -> Optional[str]:
+    def _call_openai(self, prompt: str, request_type: Optional[str] = None) -> Optional[str]:
         """调用OpenAI API"""
         try:
             openai_config = self.config.get("openai", {})
             params = self.config.get("parameters", {})
+            
+            # 获取动态超时时间
+            if request_type:
+                # 临时设置意图类型用于超时计算
+                temp_prompt = f"[INTENT_TYPE:{request_type}] {prompt}"
+                timeout_seconds = self._get_timeout_by_request_type(temp_prompt)
+            else:
+                timeout_seconds = self._get_timeout_by_request_type(prompt)
             
             headers = {
                 "Content-Type": "application/json",
@@ -107,11 +205,32 @@ class LLMClient:
                 "messages": [{"role": "user", "content": prompt}]
             }
             
-            # 添加可选参数
-            if params.get("temperature") is not None:
-                data["temperature"] = params.get("temperature", 0.7)
+            # 处理模型参数兼容性
+            model_name = openai_config.get("model", "gpt-3.5-turbo").lower()
+            
+            # 检测是否为新一代模型（o1系列、gpt-5系列等）
+            is_new_generation_model = any(x in model_name for x in ["o1-", "gpt-5", "gpt-5-mini"])
+            # 检测是否为较新的模型（gpt-4o等）
+            is_newer_model = any(x in model_name for x in ["gpt-4o", "gpt-4-turbo"])
+            
+            # 对于新一代模型，只使用基本参数
+            if is_new_generation_model:
+                # o1系列等模型只支持默认参数，不添加temperature等
+                pass
+            else:
+                # 其他模型可以使用temperature参数
+                if params.get("temperature") is not None:
+                    data["temperature"] = params.get("temperature", 0.7)
+            
+            # 处理max_tokens参数兼容性
             if params.get("max_tokens") is not None:
-                data["max_tokens"] = params.get("max_tokens", 4000)
+                if is_newer_model or is_new_generation_model:
+                    # 新模型使用max_completion_tokens
+                    data["max_completion_tokens"] = params.get("max_tokens", 4000)
+                else:
+                    # 旧模型使用max_tokens
+                    data["max_tokens"] = params.get("max_tokens", 4000)
+            
             if params.get("top_p") is not None:
                 data["top_p"] = params.get("top_p", 0.9)
             
@@ -119,7 +238,7 @@ class LLMClient:
                 f"{openai_config.get('base_url', 'https://api.openai.com/v1')}/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=30  # 添加超时设置
+                timeout=timeout_seconds
             )
             
             # 检查响应状态码
@@ -159,11 +278,19 @@ class LLMClient:
             print(f"调用OpenAI API时出错: {str(e)}")
             return None
     
-    def _call_azure_openai(self, prompt: str) -> Optional[str]:
+    def _call_azure_openai(self, prompt: str, request_type: Optional[str] = None) -> Optional[str]:
         """调用Azure OpenAI API"""
         try:
             azure_config = self.config.get("azure_openai", {})
             params = self.config.get("parameters", {})
+            
+            # 获取动态超时时间
+            if request_type:
+                # 临时设置意图类型用于超时计算
+                temp_prompt = f"[INTENT_TYPE:{request_type}] {prompt}"
+                timeout_seconds = self._get_timeout_by_request_type(temp_prompt)
+            else:
+                timeout_seconds = self._get_timeout_by_request_type(prompt)
             
             headers = {
                 "Content-Type": "application/json",
@@ -174,21 +301,51 @@ class LLMClient:
                 "messages": [{"role": "user", "content": prompt}]
             }
             
-            # 添加可选参数
-            if params.get("temperature") is not None:
-                data["temperature"] = params.get("temperature", 0.7)
+            # 处理模型参数兼容性
+            model_name = azure_config.get("deployment_name", "").lower()
+            
+            # 检测是否为新一代模型（o1系列、gpt-5系列等）
+            is_new_generation_model = any(x in model_name for x in ["o1-", "gpt-5", "gpt-5-mini"])
+            # 检测是否为较新的模型（gpt-4o等）
+            is_newer_model = any(x in model_name for x in ["gpt-4o", "gpt-4-turbo"])
+            
+            # 对于新一代模型，只使用基本参数
+            if is_new_generation_model:
+                # o1系列和gpt-5系列等模型只支持默认参数，不添加temperature等
+                pass
+            else:
+                # 其他模型可以使用temperature参数
+                if params.get("temperature") is not None:
+                    data["temperature"] = params.get("temperature", 0.7)
+            
+            # 处理max_tokens参数兼容性
             if params.get("max_tokens") is not None:
-                data["max_tokens"] = params.get("max_tokens", 4000)
-            if params.get("top_p") is not None:
+                if is_newer_model or is_new_generation_model:
+                    # 新模型使用max_completion_tokens
+                    data["max_completion_tokens"] = params.get("max_tokens", 4000)
+                else:
+                    # 旧模型使用max_tokens
+                    data["max_tokens"] = params.get("max_tokens", 4000)
+                    
+            if params.get("top_p") is not None and not is_new_generation_model:
+                # 新一代模型可能也不支持top_p参数
                 data["top_p"] = params.get("top_p", 0.9)
             
             endpoint = azure_config.get("endpoint", "").rstrip("/")
             deployment = azure_config.get("deployment_name")
-            api_version = azure_config.get("api_version", "2024-02-01")
             
-            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+            # 使用v1 endpoint格式，不需要api_version参数
+            if "/openai/v1" in endpoint:
+                # 新的v1 endpoint格式
+                url = f"{endpoint}/chat/completions"
+                # 在请求体中添加model参数
+                data["model"] = deployment
+            else:
+                # 传统的deployment格式，保留api_version以兼容旧配置
+                api_version = azure_config.get("api_version", "2024-02-01")
+                url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
             
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, json=data, timeout=timeout_seconds)
             
             # 检查响应状态码
             if response.status_code == 200:
@@ -227,11 +384,19 @@ class LLMClient:
             print(f"调用Azure OpenAI API时出错: {str(e)}")
             return None
     
-    def _call_custom(self, prompt: str) -> Optional[str]:
+    def _call_custom(self, prompt: str, request_type: Optional[str] = None) -> Optional[str]:
         """调用自定义LLM API"""
         try:
             custom_config = self.config.get("custom", {})
             params = self.config.get("parameters", {})
+            
+            # 获取动态超时时间
+            if request_type:
+                # 临时设置意图类型用于超时计算
+                temp_prompt = f"[INTENT_TYPE:{request_type}] {prompt}"
+                timeout_seconds = self._get_timeout_by_request_type(temp_prompt)
+            else:
+                timeout_seconds = self._get_timeout_by_request_type(prompt)
             
             # 获取API密钥和基础URL
             api_key = custom_config.get("api_key")
@@ -303,7 +468,7 @@ class LLMClient:
                         url=api_url,
                         headers=headers,
                         json=data,
-                        timeout=30
+                        timeout=timeout_seconds
                     )
                     
                     if response.status_code == 429:  # 频率限制
@@ -349,6 +514,79 @@ class LLMClient:
                         # 如果无法提取结果
                         print(f"响应格式不正确: {result}")
                         return f"连接测试成功，但响应格式不正确: {result}"
+                    except json.JSONDecodeError:
+                        return f"连接测试成功，但响应不是有效的JSON: {response.text}"
+                else:
+                    return f"自定义API错误: {response.status_code} - {response.text}"
+            except Exception as e:
+                return f"自定义API调用异常: {str(e)}"
+    
+    def _call_openai_sdk_with_tools(self, messages: List[Dict], tools: List[Dict] = None) -> Dict[str, Any]:
+        """使用OpenAI SDK调用API，支持工具调用"""
+        try:
+            openai_config = self.config.get("openai", {})
+            params = self.config.get("parameters", {})
+            
+            # 设置OpenAI SDK的配置
+            openai.api_key = openai_config.get("api_key")
+            if openai_config.get("organization"):
+                openai.organization = openai_config.get("organization")
+            if openai_config.get("base_url"):
+                openai.base_url = openai_config.get("base_url")
+            
+            # 构建API参数
+            api_params = {
+                "model": openai_config.get("model", "gpt-4-turbo"),
+                "messages": messages
+            }
+            
+            # 添加工具定义
+            if tools and len(tools) > 0:
+                api_params["tools"] = tools
+                api_params["tool_choice"] = "auto"
+            
+            # 处理模型参数
+            model_name = openai_config.get("model", "gpt-4-turbo").lower()
+            is_new_generation_model = any(x in model_name for x in ["o1-", "gpt-5"])
+            
+            if not is_new_generation_model:
+                if params.get("temperature") is not None:
+                    api_params["temperature"] = params.get("temperature", 0.7)
+                if params.get("max_tokens") is not None:
+                    api_params["max_completion_tokens"] = params.get("max_tokens", 4000)
+            
+            # 调用API
+            response = openai.chat.completions.create(**api_params)
+            
+            # 处理响应
+            message = response.choices[0].message
+            
+            result = {
+                "content": message.content,
+                "tool_calls": None
+            }
+            
+            # 检查是否有工具调用
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                result["tool_calls"] = []
+                for tool_call in message.tool_calls:
+                    result["tool_calls"].append({
+                        "id": tool_call.id,
+                        "type": tool_call.type,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments
+                        }
+                    })
+            
+            return result
+            
+        except Exception as e:
+            print(f"OpenAI SDK工具调用失败: {e}")
+            return {
+                "content": f"API调用失败: {str(e)}",
+                "tool_calls": None
+            }
                     except Exception as e:
                         print(f"解析响应时出错: {str(e)}")
                         return f"连接测试成功，但解析响应时出错: {str(e)}"

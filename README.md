@@ -139,18 +139,27 @@ GenBI-Demo/
 │       └── 🔧 mcp.py             # MCP协议API
 ├── 
 ├── 📁 config/                    # 配置文件目录
-│   ├── 🗄️ example_database_config.json
-│   └── 🤖 example_llm_config.json
+│   ├── 🗄️ database_config.json     # 数据库连接配置
+│   ├── 🤖 llm_config.json          # LLM服务配置
+│   ├── 🔧 mcp_config.json          # MCP服务器配置
+│   ├── 📋 schema_config.json       # 数据库表结构配置
+│   ├── 📄 example_database_config.json  # 数据库配置模板
+│   ├── 📄 example_llm_config.json      # LLM配置模板
+│   └── 📄 example_mcp_config.json      # MCP配置模板
 ├── 
 ├── 📁 utils/                     # 核心工具模块
 │   ├── ⚙️ config_manager.py      # 配置管理器
 │   ├── 🤖 llm_client.py          # LLM客户端（已优化）
 │   ├── 🔧 mcp_client.py          # MCP客户端
+│   ├── 📋 mcp_tools_registry.py  # MCP工具注册中心
+│   ├── 🛠️ mcp_tool_handler.py    # MCP工具调用处理器
 │   └── 🌐 i18n.py               # 国际化支持
 ├── 
 ├── 📁 mcp_servers/               # MCP协议服务器
 │   ├── 🗄️ mysql_server.py        # MySQL服务器（已优化）
-│   └── ☁️ athena_server.py       # AWS Athena服务器
+│   ├── ☁️ athena_server.py       # AWS Athena服务器
+│   ├── 🌐 playwright_server.py   # Web搜索服务器
+│   └── 📋 MCP_TOOLS_SPECIFICATION.md # MCP工具规范文档
 ├── 
 └── 📁 test/                      # 测试和文档文件
     ├── 📖 README_ENHANCED.md     # 增强版文档
@@ -161,12 +170,29 @@ GenBI-Demo/
 
 ## 🔧 MCP协议集成
 
-本项目支持**Model Context Protocol (MCP)** 服务器扩展，提供可插拔的工具生态系统。
+本项目完全支持**Model Context Protocol (MCP) 2025-06-18规范**，提供动态可扩展的工具生态系统。
 
-- 📖 **[MCP开发指南](test/mcp_readme.md)** - 详细的MCP服务器配置和开发文档
-- 🔧 **内置服务器**: MySQL、AWS Athena数据库连接器（已优化）
-- 🛠️ **自定义扩展**: 支持创建自定义MCP服务器
-- 🔗 **标准协议**: 基于MCP标准协议，确保兼容性
+### MCP核心特性
+- � **动态服务器发现**: 实时检测和配置MCP服务器
+- 📋 **工具注册系统**: 中央化管理6个标准MCP工具
+- 🔗 **OpenAI Functions集成**: 自动转换MCP工具为LLM可用格式
+- ✅ **JSON Schema验证**: 完整的参数验证和类型安全
+- 🛡️ **安全标记**: 破坏性操作识别和受众目标管理
+
+### 内置MCP工具
+- 🗄️ **数据库查询**: `athena_query`, `mysql_query` - 执行SQL查询
+- 📋 **表结构**: `athena_describe_table`, `mysql_describe_table` - 获取表信息
+- 🌐 **Web工具**: `web_search`, `web_fetch` - 网页搜索和内容获取
+
+### MCP服务器
+- �️ **MySQL服务器**: 支持SSL连接和复杂查询
+- ☁️ **Athena服务器**: AWS数据仓库查询支持
+- 🌐 **Playwright服务器**: 现代Web抓取和搜索
+
+### 文档资源
+- 📖 **[MCP工具规范](mcp_servers/MCP_TOOLS_SPECIFICATION.md)** - 完整的MCP实现文档
+- � **动态配置**: 通过MCP管理页面实时配置服务器
+- �️ **自定义扩展**: 支持创建符合MCP 2025规范的自定义服务器
 
 ## 🏗️ 技术架构
 
@@ -182,22 +208,33 @@ GenBI-Demo/
 - **可视化Schema管理**: 折叠式界面配置和管理数据库表结构
 - **多层安全防护**: LLM+代码双重检查防止危险操作
 - **智能错误处理**: 完善的重试机制、类型转换和错误恢复
+- **MCP 2025规范**: 完全符合最新MCP协议，支持动态工具发现和调用
+- **工具生态系统**: 可扩展的MCP工具注册和管理系统
 
 ## 🔄 最新更新日志
 
-### v2.1.0 (当前版本)
+### v3.0.0 (当前版本) - MCP协议全面升级
+- ✅ **MCP 2025-06-18规范**: 完全符合最新Model Context Protocol标准
+- ✅ **动态工具发现**: 实时MCP服务器检测和工具注册系统
+- ✅ **工具注册中心**: 统一管理6个标准MCP工具，支持JSON Schema验证
+- ✅ **OpenAI Functions集成**: MCP工具自动转换为LLM可调用格式
+- ✅ **服务器状态监控**: 实时健康检查和能力更新
+- ✅ **安全增强**: 破坏性操作标记和受众目标管理
+- ✅ **文档完善**: 完整的MCP实现规范文档
+- ✅ **向后兼容**: 保持所有原有功能的同时增加MCP能力
+
+### v2.1.0 (之前版本)
 - ✅ **OpenAI API修复**: 解决连接错误和JSON解析问题
 - ✅ **模型兼容性**: 优化参数设置，支持gpt-5-mini等最新模型
 - ✅ **意图识别优化**: 更准确区分"查询"和"分析"类型请求
 - ✅ **UI/UX改进**: Schema提示默认折叠，界面更简洁友好
 - ✅ **数据处理增强**: SQL响应自动清理，Decimal类型序列化支持
-- ✅ **项目结构优化**: 测试文件统一管理，主目录结构清晰
 
 ## 📚 文档和API
 
 - **API文档**: http://localhost:8000/docs (交互式Swagger文档)
-- **设置指南**: [test/SETUP.md](test/SETUP.md)
-- **MCP文档**: [test/mcp_readme.md](test/mcp_readme.md)
+- **MCP工具规范**: [mcp_servers/MCP_TOOLS_SPECIFICATION.md](mcp_servers/MCP_TOOLS_SPECIFICATION.md) - 完整的MCP实现文档
+- **项目计划**: [GenBI_Project_Plan.md](GenBI_Project_Plan.md) - 项目发展路线图
 
 ## 🤝 贡献指南
 
