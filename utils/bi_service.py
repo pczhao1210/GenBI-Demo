@@ -140,7 +140,20 @@ class BIService:
         self.database_config(database)
         sql = self.generate_sql(question, database)
         source = self.config.resolve_datasource(database)
-        result = DatabaseAdapter(source, self.mcp).query(sql)
+        for correction in range(3):
+            try:
+                result = DatabaseAdapter(source, self.mcp).query(sql)
+                break
+            except RuntimeError as exc:
+                if correction == 2 or not re.search(
+                        r"syntax|unknown column|invalid column|column .*does not exist|invalid identifier",
+                        str(exc), re.IGNORECASE):
+                    raise
+                prompt = (self.sql_prompt(question, database) + f"\nFailed SQL: {sql}\nDatabase error: {exc}"
+                          "\nCorrect only this query without changing the question, filters or metric definition.")
+                response = self.router.call("sql" if correction == 0 else "reasoning", "generate_sql",
+                                            prompt, request_type="query")
+                sql = validate_readonly_sql(response, source["engine"])
         data = result.get("data")
         if not isinstance(data, dict):
             raise RuntimeError("Query response is missing data")
@@ -164,6 +177,13 @@ class BIService:
 
     def analysis_plan(self, question: str, database: str,
                       previous_plan: Dict = None, feedback: str = "") -> Dict[str, Any]:
+        from utils.analysis import MethodLibrary
+        selected_metrics = [definition for identifier, definition in self.config.load_semantics().get("metrics", {}).items()
+                            if identifier in question]
+        conditions = {"has_components": any(m.get("numerator") and m.get("denominator") for m in selected_metrics),
+                      "has_time": '"time"' in question}
+        methods = MethodLibrary(self.config.load_methods()).retrieve(
+            question, ["database.query", "knowledge.search", "external.search", "llm.analysis"], conditions)
         prompt = (
             "Return a JSON analysis plan without markdown. Use only the supplied schema. "
             "Step types: sql_query, external_data, llm_analysis. Each step has a unique positive "
@@ -174,6 +194,8 @@ class BIService:
             "Do not request unavailable external facts as if they were already known. "
             'Top-level shape: {"analysis_goal": "...", "steps": [...], "expected_output": "..."}\n'
             + self.sql_prompt(question, database)
+            + "\nPortable methods (recheck prerequisites; bind current schema, never reuse old facts): "
+            + json.dumps(methods, ensure_ascii=False)
         )
         if previous_plan is not None:
             prompt += f"\nPrevious plan: {json.dumps(previous_plan, ensure_ascii=False)}\nFeedback: {feedback}"
@@ -184,6 +206,14 @@ class BIService:
         except (ValueError, TypeError) as exc:
             raise ValueError("LLM returned an invalid JSON analysis plan") from exc
         return validate_plan(plan)
+
+    def assess(self, question, results, ledger):
+        from utils.analysis import assess
+        return assess(question, results, ledger, self.router.call)
+
+    def present(self, conclusion):
+        from utils.analysis import render_conclusion
+        return render_conclusion(conclusion, self.router.call)
 
     def execute_plan(self, plan: Dict, question: str, database: str) -> Dict[str, Any]:
         plan = validate_plan(plan)
@@ -231,8 +261,8 @@ class BIService:
                 "Base conclusions only on the supplied evidence. Explicitly report missing data, "
                 "truncation, source uncertainty, and limits of causal inference."
             )
-            return {"status": "success", "data": self.router.call("reasoning", "generate_response", prompt,
-                                                                 request_type="analysis")}
+            return {"status": "success", "evidence_class": "interpretation",
+                    "data": self.router.call("reasoning", "generate_response", prompt, request_type="analysis")}
         raise ValueError(f"Step requires workflow input: {step['step_type']}")
 
     def understand(self, question, database, context, requested_at):

@@ -33,3 +33,14 @@ def save_knowledge(value: dict[str, Any]):
 @router.get("/search")
 def search(q: str, scope: str | None = None):
     return KnowledgeIndex(ConfigManager().load_knowledge()).search(q, scope=scope)
+
+
+@router.get("/methods")
+def methods():
+    return ConfigManager().load_methods()
+
+
+@router.put("/methods")
+def save_methods(value: dict[str, Any]):
+    ConfigManager().save_methods(value)
+    return {"status": "saved"}

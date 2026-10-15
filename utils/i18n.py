@@ -360,6 +360,11 @@ TRANSLATIONS["en"].update({
     "disable_server": "Disable calls",
 })
 for key, zh, en in [
+    ("methods_title", "方法与验证案例", "Methods and validated cases"),
+    ("methods_help", "方法需依次经过 draft / validated / published。验证阶段填写 reviewer、fixture_ids、passed；仅发布的方法参与检索，历史源与结论不进入新计划。",
+     "Move methods through draft / validated / published with reviewer, fixture_ids and passed validation. Only published methods are retrieved; historical bindings and conclusions are excluded."),
+    ("methods_json", "方法库 JSON", "Method library JSON"), ("save_methods", "保存方法库", "Save method library"),
+    ("analysis_ledger", "任务与进度账本", "Task and progress ledger"),
     ("semantics_title", "业务语义与知识", "Business semantics & knowledge"),
     ("ontology_title", "可计算语义", "Computable ontology"), ("knowledge_title", "知识资料", "Knowledge"),
     ("ontology_help", "指标需填写 formula、aggregation、time_field、unit、allowed_dimensions、mappings。无映射表示可解释但不可计算。",

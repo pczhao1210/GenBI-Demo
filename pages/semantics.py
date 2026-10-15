@@ -49,3 +49,14 @@ with knowledge:
             with st.expander(f"{chunk['title']} · {chunk['chunk_id']} · {chunk['score']:.2f}"):
                 st.write(chunk["text"])
                 st.json({key: value for key, value in chunk.items() if key != "text"})
+
+with st.expander(t("methods_title")):
+    st.caption(t("methods_help"))
+    methods = st.text_area(t("methods_json"), json.dumps(config.load_methods() or {"methods": []},
+                                                        ensure_ascii=False, indent=2), height=300)
+    if st.button(t("save_methods")):
+        try:
+            config.save_methods(parse_json(methods))
+            st.success(t("config_saved"))
+        except ValueError as exc:
+            st.error(str(exc))

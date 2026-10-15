@@ -27,7 +27,7 @@ def snapshot_config(config):
     return {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
             "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources,
             "semantics": config.load_semantics(), "knowledge": config.load_knowledge(),
-            "model_roles": config.load_model_roles()}
+            "model_roles": config.load_model_roles(), "methods": config.load_methods()}
 
 
 class FrozenConfig:
@@ -62,6 +62,9 @@ class FrozenConfig:
     def load_model_roles(self):
         return deepcopy(self.snapshot["model_roles"])
 
+    def load_methods(self):
+        return deepcopy(self.snapshot["methods"])
+
 
 class RunService:
     def __init__(self, store=None, config=None, service_factory=BIService):
@@ -85,7 +88,8 @@ class RunService:
                  "phase": "UNDERSTAND", "plan": plan, "plan_version": 1, "steps": reuse or {},
                  "request": None, "created_at": utcnow(), "updated_at": utcnow(),
                  "answer_sufficiency": None, "event_seq": 0, "active_seconds": 0,
-                 "limits": {"max_steps": 30, "active_seconds": 300},
+                 "limits": {"max_steps": 30, "active_seconds": 300, "tool_calls": 64,
+                            "model_calls": 32, "replans": 2, "stagnation": 2},
                  "source_version": fingerprint(snapshot), "cancel_capability": "cooperative"}
         previous = next((run for run in self.store.history(session_id)
                          if run["database"] == database and run["status"] == "SUCCEEDED"
@@ -216,6 +220,8 @@ class RunService:
             state = self.store.get(run_id)
             snapshot = self.store.get(run_id, private=True)["snapshot"]
             service = self.service_factory(config_manager=FrozenConfig(snapshot))
+            if isinstance(service, BIService):
+                service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
             if state["plan"] is None:
                 understanding = state.get("understanding")
                 if understanding is None:
@@ -244,12 +250,20 @@ class RunService:
                 if intent == "analysis":
                     plan = service.analysis_plan(understanding["normalized_question"], state["database"])
                     self.store.update(run_id, lambda s: s.update(plan=plan, phase="PLAN"), "plan_created")
+                    self.store.update(run_id, lambda s: s.update(analysis_mode=True, ledger={
+                        "goal": state["question"], "constraints": understanding["slots"],
+                        "hypotheses": [], "unknown": [], "round": 0, "replans": 0, "stagnation": 0,
+                        "evidence_fingerprints": [], "progress": [],
+                    }))
                     self._waiting(run_id, "plan_confirmation", "Confirm the proposed analysis plan")
                     return
                 plan = validate_plan({"steps": [{"step_id": 1, "step_type": "sql_query",
                                                  "description": state["question"]}]})
                 self.store.update(run_id, lambda s: s.update(plan=plan), "plan_created")
-            self._dag(run_id, service, started)
+            if self.store.get(run_id).get("analysis_mode"):
+                self._analysis(run_id, service, started)
+            else:
+                self._dag(run_id, service, started)
         except Exception as exc:
             logger.exception("Run %s failed", run_id)
             self.store.update(run_id, lambda s: s.update(
@@ -284,9 +298,10 @@ class RunService:
                         continue
                     dependencies = [state["steps"].get(str(ref), {}) for ref in step["dependencies"]]
                     optional = [state["steps"].get(str(ref), {}) for ref in step["optional_dependencies"]]
-                    if cancelled or exhausted:
+                    calls_exhausted = self.store.get(run_id).get("tool_calls", 0) >= state["limits"]["tool_calls"]
+                    if cancelled or exhausted or calls_exhausted:
                         self._step_state(run_id, key, {"status": "CANCELLED" if cancelled else "BLOCKED",
-                                                       "error": "Cancelled" if cancelled else "Active time budget exhausted"})
+                                                       "error": "Cancelled" if cancelled else "Execution budget exhausted"})
                     elif any(item.get("status") in STEP_TERMINAL - {"SUCCEEDED"} for item in dependencies):
                         self._step_state(run_id, key, {"status": "BLOCKED", "error": "Required dependency failed"})
                     elif all(item.get("status") == "SUCCEEDED" for item in dependencies) and all(
@@ -304,8 +319,12 @@ class RunService:
                                            if item["status"] == "SUCCEEDED"
                                            else {"status": "error", "message": item.get("error")})
                         attempt = uuid4().hex
+                        if self.store.get(run_id)["status"] == "CANCELLING":
+                            continue
                         self._step_state(run_id, key, {"status": "RUNNING", "attempt_id": attempt,
+                                                       "attempt_count": existing.get("attempt_count", 0) + 1,
                                                        "validity": "CURRENT"})
+                        self.store.update(run_id, lambda s: s.update(tool_calls=s.get("tool_calls", 0) + 1))
                         future = pool.submit(service.execute_step, step, state.get("normalized_question", state["question"]),
                                              step.get("datasource_id", state["database"]), inputs)
                         futures[future] = (key, attempt, state["plan_version"])
@@ -326,19 +345,104 @@ class RunService:
                     except Exception as exc:
                         logger.exception("Run %s step %s failed", run_id, key)
                         result = {"status": "FAILED", "error": str(exc), "validity": "CURRENT"}
+                        current = self.store.get(run_id)
+                        if (isinstance(exc, (TimeoutError, ConnectionError))
+                                and current["status"] != "CANCELLING"
+                                and current["steps"][key]["attempt_count"] <= 2):
+                            result["status"] = "PENDING"
                     def merge(s):
                         if (s["plan_version"] == version and
                                 s["steps"][key].get("attempt_id") == attempt):
                             s["steps"][key].update(result)
                     self.store.update(run_id, merge, "step_finished",
                                       {"step_id": key, "attempt_id": attempt, **result})
+        if not self.store.get(run_id).get("analysis_mode"):
+            self._finish(run_id, len(plan["steps"]))
+
+    def _finish(self, run_id, total):
         def finish(s):
             successes = sum(item["status"] == "SUCCEEDED" for item in s["steps"].values())
             status = ("CANCELLED" if s["status"] == "CANCELLING" else
-                      "SUCCEEDED" if successes == len(plan["steps"]) else "PARTIAL" if successes else "FAILED")
+                      "SUCCEEDED" if successes == total else "PARTIAL" if successes else "FAILED")
             s.update(status=status, phase="RENDER", owner=None,
-                     answer_sufficiency="QUALIFIED" if successes else "INSUFFICIENT")
+                     answer_sufficiency=s.get("answer_sufficiency") or ("QUALIFIED" if successes else "INSUFFICIENT"))
         self.store.update(run_id, finish, "run_finished")
+
+    def _analysis(self, run_id, service, started):
+        from utils.analysis import evidence_content
+        while True:
+            self._dag(run_id, service, started)
+            state = self.store.get(run_id)
+            if state["status"] == "WAITING_INPUT":
+                return
+            if state["status"] == "CANCELLING":
+                self._finish(run_id, len(state["plan"]["steps"]))
+                return
+            results = {int(key): self.store.artifact(run_id, step["artifact_id"])
+                       for key, step in state["steps"].items() if step["status"] == "SUCCEEDED"}
+            if not results:
+                self._finish(run_id, len(state["plan"]["steps"]))
+                return
+            ledger = deepcopy(state["ledger"])
+            prints = sorted({fingerprint(evidence_content(result.get("data"))) for result in results.values()})
+            new = sorted(set(prints) - set(ledger["evidence_fingerprints"]))
+            ledger["stagnation"] = 0 if new else ledger["stagnation"] + 1
+            ledger["round"] += 1
+            ledger["evidence_fingerprints"] = sorted(set(ledger["evidence_fingerprints"]) | set(prints))
+            self.store.update(run_id, lambda s: s.update(phase="ASSESS"), "phase_changed", {"phase": "ASSESS"})
+            package = service.assess(state.get("normalized_question", state["question"]), results, ledger)
+            ledger.update(hypotheses=package["hypotheses"], unknown=package["gaps"])
+            ledger["progress"].append({"round": ledger["round"], "new_evidence": len(new),
+                                       "remaining_gaps": package["gaps"]})
+            stopped = (not package["next_plan"] or package["premise"] == "REFUTED"
+                       or ledger["replans"] >= state["limits"]["replans"]
+                       or ledger["stagnation"] >= state["limits"]["stagnation"]
+                       or time.monotonic() - started + state["active_seconds"] >= state["limits"]["active_seconds"])
+            self.store.update(run_id, lambda s: s.update(ledger=ledger, conclusion=package,
+                                                        answer_sufficiency=package["answer_sufficiency"]),
+                              "evidence_assessed", {"premise": package["premise"],
+                                                    "sufficiency": package["answer_sufficiency"], "new_evidence": len(new)})
+            if stopped:
+                if package["next_plan"]:
+                    package["gaps"].append("Analysis stopped at the configured progress or execution budget.")
+                    package["next_plan"] = None
+                self.store.update(run_id, lambda s: s.update(phase="SYNTHESIZE", conclusion=package))
+                if self.store.get(run_id)["status"] == "CANCELLING":
+                    self._finish(run_id, len(state["plan"]["steps"]))
+                    return
+                report = service.present(package)
+                self.store.update(run_id, lambda s: s.update(report=report), "answer_rendered")
+                self._finish(run_id, len(state["plan"]["steps"]))
+                return
+            ledger["replans"] += 1
+            self._replace_plan(run_id, package["next_plan"], ledger)
+
+    def _replace_plan(self, run_id, plan, ledger):
+        plan = validate_plan(plan)
+        old = self.store.get(run_id)
+        old_steps = {step["step_id"]: step for step in old["plan"]["steps"]}
+        reusable = set()
+        steps = {}
+        for step in plan["steps"]:
+            key = str(step["step_id"])
+            previous = old["steps"].get(key, {})
+            dependencies = step["dependencies"] + step["optional_dependencies"]
+            if (old_steps.get(step["step_id"]) == step and set(dependencies) <= reusable
+                    and previous.get("status") == "SUCCEEDED" and previous.get("validity") == "CURRENT"):
+                reusable.add(step["step_id"])
+                steps[key] = previous
+            elif previous.get("artifact_id"):
+                steps[key] = {**previous, "status": "PENDING", "validity": "STALE", "attempt_count": 0}
+        def change(s):
+            if s["status"] == "CANCELLING":
+                return
+            s.setdefault("plan_history", []).append({"plan": s["plan"], "steps": s["steps"],
+                                                     "version": s["plan_version"]})
+            s.update(plan=plan, plan_version=s["plan_version"] + 1, steps=steps, ledger=ledger, phase="VALIDATE")
+        self.store.update(run_id, change, "plan_revised", {
+            "reason": ledger["unknown"], "reused_steps": sorted(reusable),
+            "added": sorted({s["step_id"] for s in plan["steps"]} - set(old_steps)),
+            "removed": sorted(set(old_steps) - {s["step_id"] for s in plan["steps"]})})
 
     def _step_state(self, run_id, key, result):
         self.store.update(run_id, lambda s: s["steps"].setdefault(key, {}).update(result),

@@ -161,3 +161,11 @@ class ConfigManager:
             if not isinstance(config, dict) or not config.get("provider"):
                 raise ValueError("Each role requires a complete LLM provider configuration")
         self._save_config("model_roles.json", roles)
+
+    def load_methods(self):
+        return self._load_config("methods.json")
+
+    def save_methods(self, library):
+        from utils.analysis import validate_methods
+        validate_methods(library, self.load_methods())
+        self._save_config("methods.json", library)

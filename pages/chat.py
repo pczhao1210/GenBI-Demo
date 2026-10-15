@@ -64,6 +64,11 @@ def workspace():
                     st.json(run["understanding"]["slots"])
             if run.get("answer_sufficiency"):
                 st.caption(f"{t('answer_sufficiency')}: {run['answer_sufficiency']}")
+            if run.get("report"):
+                st.markdown(run["report"])
+            if run.get("ledger"):
+                with st.expander(t("analysis_ledger")):
+                    st.json(run["ledger"])
             completed = sum(s["status"] == "SUCCEEDED" for s in run["steps"].values())
             total = len((run.get("plan") or {}).get("steps", []))
             st.caption(f"{t('completed_steps')}: {completed}/{total}")

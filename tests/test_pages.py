@@ -18,6 +18,11 @@ class PageTests(ConfigTestCase):
             "intent": self.bi.identify_intent.return_value, "slots": {},
             "normalized_question": question, "clarification": None,
         }
+        self.bi.assess.return_value = {
+            "answer_sufficiency": "QUALIFIED", "premise": "UNKNOWN", "claims": [],
+            "hypotheses": [], "gaps": ["limited evidence"], "next_plan": None,
+        }
+        self.bi.present.return_value = "Validated evidence summary"
         self.bi.execute_step.return_value = {
             "status": "success", "sql": "SELECT 1", "data": query_response()["result"]["data"],
         }
