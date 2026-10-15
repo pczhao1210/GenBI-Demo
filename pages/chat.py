@@ -20,6 +20,8 @@ with st.sidebar:
     if not database:
         st.info(t("configure_source_hint"))
         database = "mysql"
+    active_sources = st.multiselect(t("active_sources"), list(sources), default=[database] if database in sources else [],
+                                    format_func=lambda key: sources[key]["name"])
     sessions = st.session_state.setdefault("run_sessions", {})
     session_id = sessions.setdefault(database, uuid4().hex)
     if st.button(t("new_conversation")):
@@ -118,7 +120,7 @@ try:
     workspace()
     prompt = get_test_question_input() or st.chat_input(t("enter_question"))
     if prompt:
-        run = service.submit(prompt, database, session_id, uuid4().hex)
+        run = service.submit(prompt, database, session_id, uuid4().hex, datasource_ids=active_sources)
         service.start(run["run_id"])
         st.rerun()
 except (ValueError, RuntimeError) as exc:

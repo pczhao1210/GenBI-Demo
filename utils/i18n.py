@@ -360,6 +360,11 @@ TRANSLATIONS["en"].update({
     "disable_server": "Disable calls",
 })
 for key, zh, en in [
+    ("active_sources", "活动数据源集合", "Active data sources"),
+    ("standard_mcp_config", "标准 MCP 服务器配置", "Standard MCP server configuration"),
+    ("standard_mcp_help", "按服务器名称填写 JSON：protocol=mcp，type=stdio 或 streamable_http，status=active，capabilities 为能力到工具名的映射。内置工具无需改写。",
+     "JSON keyed by server: protocol=mcp, type=stdio or streamable_http, status=active, capabilities maps capabilities to tool names. Built-in tools are unchanged."),
+    ("standard_mcp_json", "MCP JSON", "MCP JSON"), ("save_standard_mcp", "保存 MCP 服务器", "Save MCP servers"),
     ("methods_title", "方法与验证案例", "Methods and validated cases"),
     ("methods_help", "方法需依次经过 draft / validated / published。验证阶段填写 reviewer、fixture_ids、passed；仅发布的方法参与检索，历史源与结论不进入新计划。",
      "Move methods through draft / validated / published with reviewer, fixture_ids and passed validation. Only published methods are retrieved; historical bindings and conclusions are excluded."),

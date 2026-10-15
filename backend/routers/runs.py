@@ -14,6 +14,7 @@ class SubmitRun(BaseModel):
     session_id: str | None = None
     submission_id: str = Field(min_length=1)
     plan: dict[str, Any] | None = None
+    datasource_ids: list[str] | None = None
 
 
 class Response(BaseModel):

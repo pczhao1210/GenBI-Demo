@@ -38,3 +38,27 @@ class ModelRouter:
             raise
         finally:
             record["seconds"] = time.monotonic() - started
+
+
+class ToolBudget:
+    def __init__(self, max_calls=64):
+        self.max_calls = max_calls
+        self.records = []
+        self._lock = threading.Lock()
+
+    def call(self, capability, function, *args, **kwargs):
+        record = {"capability": capability, "status": "RUNNING"}
+        with self._lock:
+            if len(self.records) >= self.max_calls:
+                raise RuntimeError("Tool call budget exhausted")
+            self.records.append(record)
+        started = time.monotonic()
+        try:
+            result = function(*args, **kwargs)
+            record["status"] = "SUCCEEDED"
+            return result
+        except Exception as exc:
+            record.update(status="FAILED", error=str(exc))
+            raise
+        finally:
+            record["seconds"] = time.monotonic() - started

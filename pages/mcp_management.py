@@ -30,7 +30,8 @@ with col2:
                     "args": [f"mcp_servers/{server_name}_server.py"],
                     "status": "inactive",
                     "description": server_info.get("description", ""),
-                    "capabilities": server_info.get("capabilities", []),
+                    "capabilities": (config.get("capabilities", {}) if config.get("protocol") == "mcp"
+                                     else server_info.get("capabilities", [])),
                     "version": server_info.get("version", "1.0.0"),
                     "methods": server_info.get("methods", [])
                 }
@@ -156,3 +157,22 @@ else:
                     st.rerun()
             
             st.divider()
+
+with st.expander(t("standard_mcp_config")):
+    import json
+    st.caption(t("standard_mcp_help"))
+    settings = st.text_area(t("standard_mcp_json"), "{}")
+    if st.button(t("save_standard_mcp")):
+        try:
+            servers = json.loads(settings)
+            if not isinstance(servers, dict):
+                raise ValueError("MCP configuration must be an object keyed by server name")
+            for value in servers.values():
+                if (value.get("protocol") != "mcp" or value.get("type") not in ("stdio", "streamable_http")
+                        or not isinstance(value.get("capabilities", {}), dict)):
+                    raise ValueError("Standard MCP requires protocol=mcp, stdio/streamable_http and capability mapping")
+            config_manager.save_mcp_config({**mcp_config, **servers})
+            st.success(t("config_saved"))
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))

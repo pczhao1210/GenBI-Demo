@@ -7,7 +7,7 @@ from utils.llm_client import LLMClient
 from utils.mcp_client import MCPClient, normalize_response
 from utils.sql_utils import clean_sql_response, validate_readonly_sql
 from utils.datasources import DatabaseAdapter
-from utils.model_router import ModelRouter
+from utils.model_router import ModelRouter, ToolBudget
 from utils.semantics import KnowledgeIndex
 
 
@@ -43,7 +43,8 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         step_id = step.get("step_id")
         if type(step_id) is not int or step_id <= 0 or step_id in identifiers:
             raise ValueError("Analysis step IDs must be unique positive integers")
-        if step.get("step_type") not in ("sql_query", "external_data", "llm_analysis", "user_input"):
+        if step.get("step_type") not in ("sql_query", "external_data", "llm_analysis", "user_input",
+                                         "compute", "data_align", "knowledge_retrieval"):
             raise ValueError(f"Unsupported analysis step type: {step.get('step_type')}")
         dependencies = step.get("dependencies", [])
         if not isinstance(dependencies, list) or any(type(ref) is not int for ref in dependencies):
@@ -73,7 +74,12 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError("Analysis requires at least one data input")
             requirements["input_data"] = normalized
             step["analysis_requirements"] = requirements
-            step["dependencies"] = list(dict.fromkeys([*dependencies, *normalized]))
+            step["dependencies"] = list(dict.fromkeys([*dependencies, *(ref for ref in normalized if ref not in optional)]))
+        if step["step_type"] in ("compute", "data_align"):
+            inputs = step.get("compute_requirements", {}).get("inputs")
+            if (not isinstance(inputs, list) or not inputs or any(type(ref) is not int for ref in inputs)
+                    or not set(inputs) <= set(dependencies + optional)):
+                raise ValueError("Compute inputs must be declared step dependencies")
         identifiers.add(step_id)
         steps.append(step)
     for step in steps:
@@ -99,6 +105,7 @@ class BIService:
         self.mcp = mcp_client or MCPClient(self.config)
         self._llm = llm_client
         self.router = ModelRouter(self.config, llm_client)
+        self.tools = ToolBudget()
 
     @property
     def llm(self):
@@ -142,7 +149,7 @@ class BIService:
         source = self.config.resolve_datasource(database)
         for correction in range(3):
             try:
-                result = DatabaseAdapter(source, self.mcp).query(sql)
+                result = self.tools.call("database.query", DatabaseAdapter(source, self.mcp).query, sql)
                 break
             except RuntimeError as exc:
                 if correction == 2 or not re.search(
@@ -176,7 +183,7 @@ class BIService:
         return response
 
     def analysis_plan(self, question: str, database: str,
-                      previous_plan: Dict = None, feedback: str = "") -> Dict[str, Any]:
+                      previous_plan: Dict = None, feedback: str = "", datasource_ids=None) -> Dict[str, Any]:
         from utils.analysis import MethodLibrary
         selected_metrics = [definition for identifier, definition in self.config.load_semantics().get("metrics", {}).items()
                             if identifier in question]
@@ -186,14 +193,23 @@ class BIService:
             question, ["database.query", "knowledge.search", "external.search", "llm.analysis"], conditions)
         prompt = (
             "Return a JSON analysis plan without markdown. Use only the supplied schema. "
-            "Step types: sql_query, external_data, llm_analysis. Each step has a unique positive "
+            "Step types: sql_query, external_data, llm_analysis, compute, data_align, knowledge_retrieval, user_input. "
+            "Every sql_query must bind an explicit datasource_id. Never submit cross-source SQL to a single database. "
+            "Push filtering and aggregation to each source. For cross-source outputs, result_contract must declare "
+            "entity, grain, time_range and units. Use compute_requirements with operation join|aggregate|ratio|difference, "
+            "inputs (exact dependency IDs), group_by, columns (aggregate), numerator/denominator (ratio/difference). "
+            "Joins require left_on/right_on lists, cardinality one_to_one|one_to_many|many_to_one, max_unmatched_ratio. "
+            "Ratio sums numerator and denominator before dividing. No Python code or eval. "
+            "External data needs query or url plus evidence_need {variable,region,unit,start,end} with absolute times. "
+            "Each step has a unique positive "
             "integer step_id, description, step_type, and dependencies (integer IDs). "
             "SQL steps use query_requirements with tables, filters, metrics and grouping. "
             "Analysis steps use analysis_requirements with method, input_data (integer step IDs), "
             "focus_areas. External steps use data_requirements with a search query. "
             "Do not request unavailable external facts as if they were already known. "
             'Top-level shape: {"analysis_goal": "...", "steps": [...], "expected_output": "..."}\n'
-            + self.sql_prompt(question, database)
+            + "\n".join(f"datasource_id: {identifier}\n{self.sql_prompt(question, identifier)}"
+                        for identifier in datasource_ids or [database])
             + "\nPortable methods (recheck prerequisites; bind current schema, never reuse old facts): "
             + json.dumps(methods, ensure_ascii=False)
         )
@@ -217,8 +233,10 @@ class BIService:
 
     def execute_plan(self, plan: Dict, question: str, database: str) -> Dict[str, Any]:
         plan = validate_plan(plan)
-        self.database_config(database)
-        self.schema(database)
+        for step in plan["steps"]:
+            if step["step_type"] == "sql_query":
+                self.database_config(step.get("datasource_id", database))
+                self.schema(step.get("datasource_id", database))
         results = {}
         for step in plan["steps"]:
             step_id = step["step_id"]
@@ -227,7 +245,7 @@ class BIService:
                 results[step_id] = {"status": "skipped", "message": f"Dependencies failed: {failed}"}
                 continue
             try:
-                results[step_id] = self.execute_step(step, question, database, results)
+                results[step_id] = self.execute_step(step, question, step.get("datasource_id", database), results)
             except (ValueError, RuntimeError) as exc:
                 results[step_id] = {"status": "error", "message": str(exc)}
         completed = all(result["status"] == "success" for result in results.values())
@@ -238,20 +256,70 @@ class BIService:
         if step["step_type"] == "sql_query":
             requirement = json.dumps(step.get("query_requirements", {}), ensure_ascii=False)
             result = self.query(f"{question}\nStep: {step.get('description', '')}\n{requirement}", database)
+            contract = step.get("result_contract", {})
+            if contract:
+                allowed = {"entity", "grain", "time_range", "units"}
+                if set(contract) - allowed:
+                    raise ValueError("Unsupported result alignment contract fields")
+                if not isinstance(contract.get("units", {}), dict) or set(contract.get("units", {})) - set(result["data"]["columns"]):
+                    raise ValueError("Result contract units reference unavailable columns")
+                result["data"].update(contract)
+                result["data"]["warnings"].append("Semantic alignment contract was declared in the approved plan.")
             return {**result, "status": "success"}
+        if step["step_type"] in ("compute", "data_align"):
+            from utils.computation import compute
+            return compute(step["compute_requirements"], results)
+        if step["step_type"] == "knowledge_retrieval":
+            chunks = KnowledgeIndex(self.config.load_knowledge()).search(
+                step.get("query", step.get("description", question)))
+            return {"status": "success", "evidence_class": "knowledge", "data": {"chunks": chunks}}
         if step["step_type"] == "external_data":
             requirements = step.get("data_requirements", {})
+            from utils.external_evidence import extract_evidence, extract_structured, fetch_document
+            from utils.run_store import utcnow
+            need = requirements.get("evidence_need")
+            if requirements.get("capability"):
+                payload = self.call_capability(requirements["capability"], requirements.get("arguments", {}))
+                if need and requirements.get("field_mapping"):
+                    document = {"url": f"tool:{requirements['capability']}", "text": json.dumps(payload, ensure_ascii=False),
+                                "complete": True, "collected_at": utcnow(), "published_at": None}
+                    data = extract_structured(document, need, requirements["field_mapping"])
+                    return {"status": "success", "evidence_class": "observation" if data["facts"] else "discovery", "data": data}
+                return {"status": "success", "evidence_class": "discovery", "data": payload}
+            if requirements.get("url"):
+                document = self.tools.call("external.fetch", fetch_document, requirements["url"])
+                if not need:
+                    return {"status": "success", "evidence_class": "discovery", "data": {"sources": [document], "facts": []}}
+                data = (extract_structured(document, need, requirements["field_mapping"])
+                        if requirements.get("field_mapping") else extract_evidence(document, need, self.router.call))
+                return {"status": "success", "evidence_class": "observation" if data["facts"] else "discovery",
+                        "data": data}
             query = requirements.get("query") or " ".join(
                 str(value) for value in requirements.values() if value
             ) or step.get("description")
             if not query:
                 raise ValueError("External data step requires a search query")
-            payload = result_payload(self.mcp.call_mcp_server(
-                "playwright", "search_web", {"query": query, "max_results": 5},
-            ))
+            payload = result_payload(self.tools.call("external.search", self.mcp.call_mcp_server,
+                                                     "playwright", "search_web", {"query": query, "max_results": 5}))
             if not payload.get("results"):
                 raise RuntimeError("No external sources found; no synthetic data substituted")
-            return {"status": "success", "data": payload}
+            if not need:
+                return {"status": "success", "evidence_class": "discovery", "data": payload}
+            data = {"sources": [], "facts": [], "warnings": []}
+            for candidate in payload["results"][:3]:
+                if not candidate.get("url"):
+                    data["warnings"].append("Search result has no retrievable URL")
+                    continue
+                try:
+                    document = self.tools.call("external.fetch", fetch_document, candidate["url"])
+                    evidence = extract_evidence(document, need, self.router.call)
+                    for key in data:
+                        data[key].extend(evidence[key])
+                except RuntimeError as exc:
+                    data["warnings"].append(str(exc))
+            if not data["sources"]:
+                raise RuntimeError("No source body retrieved: " + "; ".join(data["warnings"]))
+            return {"status": "success", "evidence_class": "observation" if data["facts"] else "discovery", "data": data}
         if step["step_type"] == "llm_analysis":
             requirements = step["analysis_requirements"]
             inputs = {ref: results[ref] for ref in requirements["input_data"]}
@@ -289,6 +357,16 @@ class BIService:
                   f"\nQuestion: {question}\n{json.dumps(chunks, ensure_ascii=False)}")
         text = self.router.call("fast", "generate_response", prompt, request_type="query")
         return {"status": "success", "data": text, "citations": chunks, "answer_sufficiency": "QUALIFIED"}
+
+    def call_capability(self, capability, arguments):
+        matches = [(name, settings["capabilities"][capability])
+                   for name, settings in self.config.load_mcp_config().items()
+                   if settings.get("status") == "active" and isinstance(settings.get("capabilities"), dict)
+                   and capability in settings["capabilities"]]
+        if len(matches) != 1:
+            raise ValueError(f"Tool capability {capability} requires one explicit active provider, found {len(matches)}")
+        server, tool = matches[0]
+        return result_payload(self.tools.call(capability, self.mcp.call_mcp_server, server, tool, arguments))
 
 
 def format_analysis_report(question: str, execution: Dict) -> str:

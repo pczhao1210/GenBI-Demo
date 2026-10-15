@@ -92,8 +92,8 @@ def validate_conclusion(package, results):
         refs = claim.get("evidence", [])
         if not refs or any(type(ref) is not int or ref not in results for ref in refs):
             raise ValueError("Claim references unavailable evidence")
-        if any(results[ref].get("evidence_class") == "interpretation" for ref in refs):
-            raise ValueError("Model interpretation cannot substitute for source evidence")
+        if any(results[ref].get("evidence_class") in ("interpretation", "discovery") for ref in refs):
+            raise ValueError("Interpretation or search discovery cannot substitute for source evidence")
         for fact in claim["facts"]:
             ref, column, row = fact.get("step_id"), fact.get("column"), fact.get("row")
             if type(ref) is not int or ref not in refs or type(row) is not int or row < 0:

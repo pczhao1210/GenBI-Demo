@@ -75,7 +75,7 @@ class RunService:
         self._lock = threading.Lock()
 
     def submit(self, question, database="mysql", session_id=None, submission_id=None,
-               plan=None, parent_run_id=None, reuse=None):
+               plan=None, parent_run_id=None, reuse=None, datasource_ids=None):
         if not question.strip():
             raise ValueError("Question cannot be empty")
         if plan is not None:
@@ -91,12 +91,15 @@ class RunService:
                  "limits": {"max_steps": 30, "active_seconds": 300, "tool_calls": 64,
                             "model_calls": 32, "replans": 2, "stagnation": 2},
                  "source_version": fingerprint(snapshot), "cancel_capability": "cooperative"}
+        identifiers = datasource_ids or [database]
+        state["datasource_ids"] = list(dict.fromkeys(identifiers))
         previous = next((run for run in self.store.history(session_id)
                          if run["database"] == database and run["status"] == "SUCCEEDED"
                          and run.get("understanding")), None)
         state["context"] = deepcopy(previous["understanding"]["slots"]) if previous else {}
         private = {"snapshot": snapshot,
-                   "submission_input": {"question": question, "database": database, "plan": plan}}
+                   "submission_input": {"question": question, "database": database, "plan": plan,
+                                        "datasource_ids": state["datasource_ids"]}}
         state, created = self.store.create(state, private, submission_id or uuid4().hex)
         if created:
             self.store.update(run_id, lambda s: None, "submitted")
@@ -198,7 +201,8 @@ class RunService:
                     reuse[key] = dict(step)
                     payloads[key] = result
         result = self.submit(previous["question"], previous["database"], previous["session_id"],
-                             plan=previous["plan"], parent_run_id=run_id, reuse=reuse)
+                             plan=previous["plan"], parent_run_id=run_id, reuse=reuse,
+                             datasource_ids=previous.get("datasource_ids"))
         for key in reuse:
             artifact = self.store.put_artifact(result["run_id"], payloads[key])
             self.store.update(result["run_id"],
@@ -222,6 +226,7 @@ class RunService:
             service = self.service_factory(config_manager=FrozenConfig(snapshot))
             if isinstance(service, BIService):
                 service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
+                service.tools.max_calls = state["limits"]["tool_calls"] - len(state.get("tool_records", []))
             if state["plan"] is None:
                 understanding = state.get("understanding")
                 if understanding is None:
@@ -248,7 +253,8 @@ class RunService:
                         "knowledge_answered")
                     return
                 if intent == "analysis":
-                    plan = service.analysis_plan(understanding["normalized_question"], state["database"])
+                    plan = service.analysis_plan(understanding["normalized_question"], state["database"],
+                                                 datasource_ids=state["datasource_ids"])
                     self.store.update(run_id, lambda s: s.update(plan=plan, phase="PLAN"), "plan_created")
                     self.store.update(run_id, lambda s: s.update(analysis_mode=True, ledger={
                         "goal": state["question"], "constraints": understanding["slots"],
@@ -273,15 +279,26 @@ class RunService:
             records = getattr(service.router, "records", []) if "service" in locals() else []
             if not isinstance(records, list):
                 records = []
+            tool_records = service.tools.records if "service" in locals() and isinstance(service, BIService) else []
             self.store.update(run_id, lambda s: s.update(
                 active_seconds=s["active_seconds"] + time.monotonic() - started,
-                model_calls=s.get("model_calls", []) + records))
+                model_calls=s.get("model_calls", []) + records,
+                tool_records=s.get("tool_records", []) + tool_records))
 
     def _dag(self, run_id, service, started):
         self.store.update(run_id, lambda s: s.update(phase="EXECUTE"), "phase_changed",
                           {"phase": "EXECUTE"})
         state = self.store.get(run_id)
         plan = validate_plan(state["plan"])
+        if isinstance(service, BIService) and any(s["step_type"] == "sql_query" for s in plan["steps"]):
+            allowed = {service.config.resolve_datasource(ref)["datasource_id"] for ref in state["datasource_ids"]}
+            for step in plan["steps"]:
+                if step["step_type"] == "sql_query":
+                    target = service.config.resolve_datasource(step.get("datasource_id", state["database"]))
+                    if target["datasource_id"] not in allowed:
+                        raise ValueError("Plan references a datasource outside the frozen active set")
+                    step["datasource_id"] = target["datasource_id"]
+            self.store.update(run_id, lambda s: s.update(plan=plan))
         if len(plan["steps"]) > state["limits"]["max_steps"]:
             raise ValueError("Plan exceeds step budget")
         futures = {}

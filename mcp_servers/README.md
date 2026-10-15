@@ -51,4 +51,23 @@ Athena 使用元数据 API 枚举表和字段，包含分区字段，不探测�
 
 管理页面可配置遵循上述内部请求 / 响应格式的 stdio 脚本。
 自定义脚本的 `get_server_info` 可用于探测；内置业务路由和六个工具仍需在代码中注册。
-标准 MCP、SSE 和自动导入任意第三方工具尚未实现，配置不支持的传输会明确报错。
+标准 MCP 另有独立适配器，保留这里的内置兼容层。管理页可添加：
+
+```json
+{
+  "observations": {
+    "protocol": "mcp",
+    "type": "streamable_http",
+    "url": "http://localhost:9000/mcp",
+    "status": "active",
+    "timeout": 30,
+    "capabilities": {"external.observation": "get_observation"}
+  }
+}
+```
+
+标准适配支持 stdio（`command` / `args`）和 Streamable HTTP，执行 initialize、
+tools/list 与 tools/call，保留结构化内容并显式传播工具错误。SSE 未实现。
+能力需明确映射到工具名；多个活动提供方有歧义时拒绝调用，不自动猜选。
+离线测试使用真实本地标准 stdio fixture 验证发现、调用与错误；
+Streamable HTTP 尚未与第三方远程服务器联调。

@@ -116,7 +116,7 @@ curl -X POST http://localhost:8000/api/chat/query \
   中断恢复需确认原执行进程已退出；无法确认完成的在途调用可能重执行，不承诺 exactly-once。
   取消为协作式：立即停止后续调度，在途调用结束后才进入 `CANCELLED`。
 - 当前工具是内置换行 JSON RPC 兼容层，**不是完整 MCP 2025 协议实现**，
-  不支持 SSE 或任意第三方 MCP 服务器。详见[工具说明](mcp_servers/README.md)。
+  标准 MCP 另有 stdio / Streamable HTTP 适配器，不支持 SSE。详见[工具说明](mcp_servers/README.md)。
 - 默认只监听本机；当前没有多用户认证或租户隔离，不应直接公开到互联网。
 - 图表、收藏和持续性能指标尚未实现。
 
@@ -208,6 +208,32 @@ SQL 字段/语法错误最多修正 2 次，第二次升级 reasoning；合法�
 前提不成立时停止归因。快速表达只安排不可变结论的顺序，数字、文字和引用由代码渲染，
 不能新增事实。`SUCCEEDED + INSUFFICIENT` 表示调查完成但证据不足，不表示找到根因。
 当前方法验证记录由人工提供，未自动训练模型；真实新领域泛化效果仍需独立留出集评估。
+
+### 跨源计算与外部证据（P4）
+
+聊天侧栏选择活动数据源集合，任务 API 接收 `datasource_ids`。每个 SQL 步骤独立绑定
+`datasource_id`，运行冻结源配置与 Schema；计划引用集合之外的源会明确失败。
+步骤类型新增 `compute` / `data_align` / `knowledge_retrieval`，旧计划与同步 API 仍可用。
+
+跨源优先源端聚合，本地用 Pandas 执行有限计算，不支持任意联邦 SQL。
+`compute_requirements` 声明 `inputs`、`operation` 与列参数；支持 join、aggregate、
+ratio、difference。Join 必须明确键与基数，双方需声明相同实体、粒度、时间区间、
+时区及兼容单位；SQL 步骤用获确认的 `result_contract` 声明语义假设，代码检查实际键、
+唯一性、未匹配比例及汇总值，不能仅凭列名相同推断业务实体相同。
+多对多拒绝执行，一对多重复度量不允许直接汇总。比率先汇总分子分母再除，NULL 默认拒绝，
+零分母保留 NULL。输入/输出上限为 10,000 行、16 MiB，关联前估算膨胀；不静默截断。
+Decimal 计算精度显式为 50 位；保留各源采集时间，不假设跨库一致性快照。
+
+外部步骤可以先搜索再抓正文，也可直接获取 HTTP(S) 文档/结构化 API，或按能力调用
+标准 MCP 工具。搜索摘要仅为 discovery，不允许当作结论证据。
+`evidence_need` 明确 variable、region、unit、绝对 start/end；
+文本抽取校验原文位置及各值，结构化 API 可用 `field_mapping` 声明 records_path、
+value/unit/region/observed_at/variable 字段，保留 JSON Pointer。时间、地区、单位不匹配的
+事实排除并记录警告；无匹配事实为证据不足。发布时点与观测时点分别保留，未知不补造。
+实际模型/工具调用均计入独立预算，外部抓取有超时和 2 MiB 文档预算。
+
+本地标准 MCP stdio fixture 已验证真实协议协商、发现、调用与错误；
+Streamable HTTP 和真实搜索/第三方 API 仍未联调，离线事实夹具不代表这些服务已验收。
 
 ## 许可证
 

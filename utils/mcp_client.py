@@ -29,6 +29,12 @@ class MCPClient:
             return {"error": f"Tool server is not configured: {server_type}"}
         if method != "get_server_info" and settings.get("status") != "active":
             return {"error": f"Tool server is disabled: {server_type}; enable it in MCP management"}
+        if settings.get("protocol") == "mcp":
+            from utils.standard_mcp import StandardMCPClient
+            try:
+                return normalize_response(StandardMCPClient(settings).call(method, params))
+            except RuntimeError as exc:
+                return {"error": str(exc)}
         if settings.get("type") != "stdio":
             return {"error": "Only the built-in stdio RPC transport is supported; SSE is not implemented"}
         command = settings.get("command") or sys.executable
