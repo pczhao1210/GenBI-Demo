@@ -54,6 +54,9 @@ class ConfigManager:
             existing = self._load_config("database_config.json")
             existing.setdefault("databases", {})[db_type] = config
             self._save_config("database_config.json", existing)
+        if (self.config_dir / "datasources.json").exists() and db_type in ("mysql", "athena"):
+            source = self.resolve_datasource(db_type)
+            self.save_datasource({**source, "config": config})
     
     def load_mcp_config(self) -> Dict[str, Any]:
         config = self._load_config("mcp_config.json")
@@ -73,10 +76,61 @@ class ConfigManager:
     
     def load_schema_config(self) -> Dict[str, Any]:
         config = self._load_config("schema_config.json")
-        return config.get("schemas", {})
+        schemas = config.get("schemas", {})
+        catalog = self._load_config("datasources.json").get("sources", {})
+        if catalog:
+            schemas = {key: value["schema"] for key, value in catalog.items()}
+            for engine in ("mysql", "athena", "postgresql", "mssql"):
+                matches = [value for value in catalog.values() if value["engine"] == engine]
+                if len(matches) == 1:
+                    schemas[engine] = matches[0]["schema"]
+        return schemas
     
     def save_schema_config(self, database: str, config: Dict[str, Any]):
+        if (self.config_dir / "datasources.json").exists():
+            source = self.resolve_datasource(database)
+            self.save_datasource({**source, "schema": config})
+            return
         with FileLock(str(self.config_dir / "schema_config.json.lock")):
             existing = self._load_config("schema_config.json")
             existing.setdefault("schemas", {})[database] = config
             self._save_config("schema_config.json", existing)
+
+    def load_datasources(self):
+        from utils.datasources import normalize_engine
+        with FileLock(str(self.config_dir / "datasources.json.lock")):
+            catalog = self._load_config("datasources.json")
+            if not catalog:
+                schemas = self._load_config("schema_config.json").get("schemas", {})
+                sources, legacy = {}, {}
+                for engine, connection in self.load_database_config().items():
+                    if engine not in ("mysql", "athena"):
+                        continue
+                    source_id = f"legacy-{engine}"
+                    sources[source_id] = {
+                        "datasource_id": source_id, "name": engine, "engine": normalize_engine(engine),
+                        "config": connection, "schema": schemas.get(engine, {}),
+                        "timezone": "UTC", "business_day_start": 0, "config_version": 1,
+                        "schema_version": 1, "description": "", "tags": [],
+                    }
+                    legacy[engine] = source_id
+                catalog = {"version": 1, "sources": sources, "legacy_mapping": legacy}
+                self._save_config("datasources.json", catalog)
+        return catalog["sources"]
+
+    def resolve_datasource(self, identifier):
+        from utils.datasources import resolve_source
+        return resolve_source(self.load_datasources(), identifier)
+
+    def save_datasource(self, source):
+        from utils.datasources import validate_source
+        source = validate_source(source)
+        self.load_datasources()
+        with FileLock(str(self.config_dir / "datasources.json.lock")):
+            catalog = self._load_config("datasources.json")
+            old = catalog["sources"].get(source["datasource_id"], {})
+            source["config_version"] = old.get("config_version", 0) + (old.get("config") != source["config"])
+            source["schema_version"] = old.get("schema_version", 0) + (old.get("schema") != source["schema"])
+            catalog["sources"][source["datasource_id"]] = source
+            self._save_config("datasources.json", catalog)
+        return source

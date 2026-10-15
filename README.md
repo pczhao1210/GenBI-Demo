@@ -1,6 +1,6 @@
 # GenBI - 生成式 BI 查询系统
 
-使用自然语言查询 MySQL / AWS Athena，并生成基于查询证据的多步骤分析报告。
+使用自然语言查询 MySQL / AWS Athena / PostgreSQL / Microsoft SQL Server，并生成基于查询证据的多步骤分析报告。
 
 ## 当前能力
 
@@ -68,7 +68,9 @@ Linux 上还可能需要浏览器系统库，参见 Playwright 安装提示。
 5. **聊天**：查询直接执行；复杂分析先展示计划，再点击执行或输入修改意见。
    计划绑定当前连接和 Schema；失败或被跳过的步骤不会显示为完成。
 
-配置当前按 `mysql` / `athena` 各保存一套连接与 Schema，不是多租户数据库目录。
+配置按稳定 `datasource_id` 保存多连接与 Schema。首次使用自动将旧 MySQL/Athena
+迁移为 `legacy-mysql` / `legacy-athena`，保存显式迁移映射，可重复执行且不按名称猜归属。
+旧 API 的引擎参数仅在该类型恰有一个连接时解析；多个连接时必须指定 ID。
 修改连接后应重新获取并保存对应 Schema。配置文件使用仓库绝对路径、原子替换和
 读改写锁，不依赖启动时的工作目录。
 
@@ -153,6 +155,24 @@ uv pip compile requirements-dev.txt --python-version 3.12 --universal --output-f
 核心文件：[共享业务服务](utils/bi_service.py)、[配置管理](utils/config_manager.py)、
 [LLM 客户端](utils/llm_client.py)、[SQL 校验](utils/sql_utils.py)。
 原始[项目规划](GenBI_Project_Plan.md)仅作为路线参考，不代表所有功能已实现。
+
+### 多数据源（P1）
+
+在数据源页按类型新增命名连接，测试实际连接，保存后在 Schema 页选择对应 ID。
+`GET/POST /api/database/sources` 管理目录；
+`GET /api/database/sources/{id}/metadata?table=...` 和 `/preview?table=...` 获取元数据和有限预览。
+同步查询可用 `datasource_id` 指定连接，任务的 `database` 也接受稳定 ID。
+引擎别名 `pgsql` / `postgres` 规范化为 `postgresql`。新驱动使用 SQLAlchemy 2.x、
+psycopg 3 和 pyodbc；旧 MySQL/Athena 继续使用现有工具。
+
+MSSQL 需在宿主机安装 **unixODBC 和 Microsoft ODBC Driver 18 for SQL Server**。
+仅安装 Python 依赖不足；数据源页“能力与驱动诊断”会检查驱动是否存在。
+按操作系统使用 Microsoft 官方安装说明：https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server
+连接失败、驱动缺失与 SQL 错误均显式报告。统一结果记录源 ID、采集时间、类型、时区、
+完整性与警告；Decimal 保留字符串精度，日期为 ISO，NULL 为 null。
+
+验证边界：离线测试覆盖四类方言、多连接隔离、迁移、预览及结果类型；尚未使用真实
+PostgreSQL/MSSQL 服务验收连接、元数据与查询，也未在本机安装 Microsoft 系统 ODBC 驱动。
 
 ## 许可证
 

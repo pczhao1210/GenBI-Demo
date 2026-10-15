@@ -13,7 +13,8 @@ def clean_sql_response(text: str) -> str:
 
 
 def validate_readonly_sql(sql: str, database_type: str = "mysql") -> str:
-    dialect = {"mysql": "mysql", "athena": "presto"}.get(database_type)
+    dialect = {"mysql": "mysql", "athena": "presto", "postgresql": "postgres", "postgres": "postgres",
+               "pgsql": "postgres", "mssql": "tsql"}.get(database_type)
     if dialect is None:
         raise ValueError(f"Unsupported database: {database_type}")
     sql = clean_sql_response(sql)

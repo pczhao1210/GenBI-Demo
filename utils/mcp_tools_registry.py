@@ -13,6 +13,18 @@ class MCPToolRegistry:
     def __init__(self):
         self.tools = {}
         self._register_default_tools()
+        for name, capability, extra, required in (
+            ("database_query", "database.query", {"sql": {"type": "string"}}, ["sql"]),
+            ("database_metadata", "database.metadata", {"table": {"type": "string"}}, []),
+            ("database_preview", "database.preview", {"table": {"type": "string"}}, ["table"]),
+        ):
+            self.register_tool({
+                "name": name, "description": f"{capability} on an explicit configured datasource_id",
+                "capability": capability,
+                "inputSchema": {"type": "object", "additionalProperties": False,
+                                "properties": {"datasource_id": {"type": "string"}, **extra},
+                                "required": ["datasource_id", *required]},
+            })
     
     def _register_default_tools(self):
         """注册默认的MCP工具"""

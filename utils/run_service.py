@@ -22,6 +22,12 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def snapshot_config(config):
+    sources = config.load_datasources()
+    return {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
+            "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources}
+
+
 class FrozenConfig:
     def __init__(self, snapshot):
         self.snapshot = snapshot
@@ -37,6 +43,13 @@ class FrozenConfig:
 
     def load_mcp_config(self):
         return deepcopy(self.snapshot["mcp"])
+
+    def load_datasources(self):
+        return deepcopy(self.snapshot["sources"])
+
+    def resolve_datasource(self, identifier):
+        from utils.datasources import resolve_source
+        return resolve_source(self.load_datasources(), identifier)
 
 
 class RunService:
@@ -55,9 +68,7 @@ class RunService:
             plan = validate_plan(plan)
         run_id = uuid4().hex
         session_id = session_id or uuid4().hex
-        snapshot = {"databases": self.config.load_database_config(),
-                    "schemas": self.config.load_schema_config(),
-                    "llm": self.config.load_llm_config(), "mcp": self.config.load_mcp_config()}
+        snapshot = snapshot_config(self.config)
         state = {"run_id": run_id, "session_id": session_id, "parent_run_id": parent_run_id,
                  "question": question, "database": database, "status": "QUEUED",
                  "phase": "UNDERSTAND", "plan": plan, "plan_version": 1, "steps": reuse or {},
@@ -155,8 +166,7 @@ class RunService:
         previous = self.store.get(run_id)
         if previous["status"] not in TERMINAL:
             raise ValueError("Only terminal runs can be retried")
-        current = {"databases": self.config.load_database_config(), "schemas": self.config.load_schema_config(),
-                   "llm": self.config.load_llm_config(), "mcp": self.config.load_mcp_config()}
+        current = snapshot_config(self.config)
         reuse, payloads = {}, {}
         if not refresh and previous["source_version"] == fingerprint(current):
             for key, step in previous["steps"].items():

@@ -14,7 +14,12 @@ config = ConfigManager()
 service = get_run_service()
 
 with st.sidebar:
-    database = st.selectbox(t("select_database"), ["mysql", "athena"])
+    sources = config.load_datasources()
+    database = st.selectbox(t("select_database"), list(sources),
+                            format_func=lambda key: f"{sources[key]['name']} ({sources[key]['engine']})")
+    if not database:
+        st.info(t("configure_source_hint"))
+        database = "mysql"
     sessions = st.session_state.setdefault("run_sessions", {})
     session_id = sessions.setdefault(database, uuid4().hex)
     if st.button(t("new_conversation")):

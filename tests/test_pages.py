@@ -48,12 +48,12 @@ class PageTests(ConfigTestCase):
         self.assertEqual(call.args[0], "athena")
         self.assertEqual(call.args[2]["database"], "athena_test")
         self.click(app, "💾 保存配置")
-        self.assertEqual(self.config.load_database_config()["athena"]["database"], "athena_test")
+        self.assertEqual(self.config.resolve_datasource("athena")["config"]["database"], "athena_test")
 
     def test_schema_switch_isolation_and_persistent_clear(self):
         app = self.page("schema_config.py")
         self.assertIn("mysql_orders", app.session_state["table_fields"])
-        app.selectbox[0].set_value("athena").run()
+        app.selectbox[0].set_value("legacy-athena").run()
         self.assertEqual(set(app.session_state["table_fields"]), {"athena_orders"})
         self.click(app, "💾 保存所有表的Schema配置")
         self.assertEqual(set(self.config.load_schema_config()["athena"]["tables"]), {"athena_orders"})
@@ -61,7 +61,7 @@ class PageTests(ConfigTestCase):
         app.run()
         self.assertEqual(dict(app.session_state["table_fields"]), {})
         self.assertEqual(self.config.load_schema_config()["athena"]["tables"], {})
-        app.selectbox[0].set_value("mysql").run()
+        app.selectbox[0].set_value("legacy-mysql").run()
         self.assertEqual(set(app.session_state["table_fields"]), {"mysql_orders"})
 
     def test_schema_edits_survive_reruns(self):
@@ -79,9 +79,9 @@ class PageTests(ConfigTestCase):
         self.assertEqual(len(app.dataframe), 1)
         app.run()
         self.assertEqual(len(app.dataframe), 1)
-        app.selectbox[0].set_value("athena").run()
+        app.selectbox[0].set_value("legacy-athena").run()
         self.assertEqual(len(app.dataframe), 0)
-        app.selectbox[0].set_value("mysql").run()
+        app.selectbox[0].set_value("legacy-mysql").run()
         self.assertEqual(len(app.dataframe), 1)
 
     def test_chat_cancel_and_clear_remove_pending_plan(self):

@@ -42,6 +42,7 @@ config/database_config.json
 config/schema_config.json
 config/mcp_config.json
 config/*.lock
+config/datasources.json
 !config/example_*.json
 
 # Logs

@@ -1,301 +1,84 @@
+from uuid import uuid4
+
 import streamlit as st
-import pandas as pd
+
 from utils.config_manager import ConfigManager
-from utils.mcp_client import MCPClient
+from utils.datasources import DatabaseAdapter, ENGINES
 from utils.i18n import t
-import time
+from utils.mcp_client import MCPClient
 
-st.set_page_config(page_title="Enhanced Database Configuration", page_icon="🗄️")
-st.title(f"🗄️ {t('database_config')} - 增强版")
+st.set_page_config(page_title="Data sources", page_icon="🗄️")
+st.title(t("database_config"))
+config = ConfigManager()
+sources = config.load_datasources()
+engine = st.selectbox(t("select_database"), ENGINES)
+candidates = [key for key, value in sources.items() if value["engine"] == engine]
+selection = st.selectbox(t("source_connection"), [*candidates, "__new__"],
+                         format_func=lambda key: t("new_connection") if key == "__new__" else sources[key]["name"])
+if selection == "__new__":
+    key = st.session_state.setdefault(f"new_source_{engine}", uuid4().hex[:12])
+    source = {"datasource_id": key, "name": engine, "engine": engine, "config": {}, "schema": {}}
+else:
+    source = sources[selection]
+prefix = f"{source['datasource_id']}_"
+current = source["config"]
 
-config_manager = ConfigManager()
-mcp_client = MCPClient()
-db_config = config_manager.load_database_config()
 
-# 添加tab界面
-tab1, tab2, tab3 = st.tabs(["数据库配置", "连接状态", "性能监控"])
+def field(label, name, default="", password=False):
+    return st.text_input(t(label), value=str(current.get(name, default)), type="password" if password else "default",
+                         key=prefix + name)
 
-with tab1:
-    st.subheader("数据库连接配置")
-    
-    # 数据库类型选择
-    db_type = st.selectbox("选择数据库类型", ["mysql", "athena"])
 
-    if db_type == "mysql":
-        st.subheader("MySQL 配置")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            host = st.text_input("主机地址", value=db_config.get("mysql", {}).get("host", "localhost"))
-            database = st.text_input("数据库名", value=db_config.get("mysql", {}).get("database", ""))
-            username = st.text_input("用户名", value=db_config.get("mysql", {}).get("username", ""))
-            
-        with col2:
-            port = st.number_input("端口", min_value=1, max_value=65535, value=db_config.get("mysql", {}).get("port", 3306))
-            password = st.text_input("密码", value=db_config.get("mysql", {}).get("password", ""), type="password")
-            
-        st.subheader("高级设置")
-        col3, col4 = st.columns(2)
-        with col3:
-            max_rows = st.number_input("最大返回行数", min_value=1, max_value=10000, value=db_config.get("mysql", {}).get("max_rows", 1000))
-            connection_timeout = st.number_input("连接超时(秒)", min_value=1, max_value=60, value=db_config.get("mysql", {}).get("connection_timeout", 10))
-        with col4:
-            max_connections = st.number_input("最大连接数", min_value=1, max_value=20, value=db_config.get("mysql", {}).get("max_connections", 5))
-            query_timeout = st.number_input("查询超时(秒)", min_value=1, max_value=300, value=db_config.get("mysql", {}).get("query_timeout", 30))
-        
-        # SSL设置
-        st.subheader("🔒 SSL安全连接设置")
-        
-        # 添加SSL信息提示
-        with st.expander("ℹ️ SSL连接说明", expanded=False):
-            st.markdown("""
-            **常见SSL错误及解决方案：**
-            
-            🚨 **错误**: `Connections using insecure transport are prohibited while --require_secure_transport=ON`
-            
-            **解决方案**：
-            1. ✅ 启用"系统CA证书"或"强制SSL连接"选项
-            2. 🔧 或者联系数据库管理员关闭 `require_secure_transport`
-            
-            **SSL模式说明**：
-            - **禁用SSL**: 不使用SSL连接（适用于本地开发）
-            - **系统CA证书**: 使用SSL并通过系统CA证书验证服务器（推荐，安全简便）
-            - **自定义证书**: 使用SSL并验证自定义证书文件（高级配置）
-            - **强制SSL**: 使用SSL但不验证证书（适用于需要SSL但无证书）
-            """)
-        
-        # 兼容旧配置
-        ssl_options = ["禁用SSL", "系统CA证书", "自定义证书", "强制SSL"]
-        current_ssl_mode = db_config.get("mysql", {}).get("ssl_mode", "系统CA证书")
-        
-        # 将旧的"验证证书"选项映射到新的"自定义证书"
-        if current_ssl_mode == "验证证书":
-            current_ssl_mode = "自定义证书"
-        
-        # 确保值在有效选项中
-        if current_ssl_mode not in ssl_options:
-            current_ssl_mode = "系统CA证书"
-        
-        ssl_mode = st.selectbox(
-            "SSL连接模式", 
-            ssl_options,
-            index=ssl_options.index(current_ssl_mode)
-        )
-        
-        use_ssl = ssl_mode != "禁用SSL"
-        verify_ssl = ssl_mode in ["系统CA证书", "自定义证书"]
-        
-        ssl_ca = ""
-        ssl_cert = ""
-        ssl_key = ""
-        
-        if ssl_mode == "自定义证书":
-            st.markdown("**证书文件配置** （用于自定义证书模式）")
-            ssl_ca = st.text_input("CA证书路径", value=db_config.get("mysql", {}).get("ssl_ca", ""), 
-                                 help="服务器CA证书文件路径")
-            ssl_cert = st.text_input("客户端证书路径", value=db_config.get("mysql", {}).get("ssl_cert", ""),
-                                   help="客户端证书文件路径（可选）")
-            ssl_key = st.text_input("客户端密钥路径", value=db_config.get("mysql", {}).get("ssl_key", ""),
-                                  help="客户端私钥文件路径（可选）")
-        elif ssl_mode == "系统CA证书":
-            st.info("💡 **系统CA证书模式**：将使用操作系统的根证书存储来验证MySQL服务器证书，无需手动配置证书文件。")
+name = st.text_input(t("connection_name"), value=source["name"], key=prefix + "name")
+st.caption(f"datasource_id: {source['datasource_id']}")
+connection = {}
+if engine == "athena":
+    for label, default in (("region", "us-east-1"), ("database", "default"), ("catalog", "AwsDataCatalog"),
+                           ("workgroup", "primary"), ("s3_output_location", "")):
+        connection[label] = field(label, label, default)
+    for label in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token"):
+        connection[label] = field(label, label, password=True)
+else:
+    for label, default in (("host", "localhost"), ("database", ""), ("username", "")):
+        connection[label] = field(label, label, default)
+    connection["password"] = field("password", "password", password=True)
+    connection["port"] = st.number_input(t("port"), 1, 65535, int(current.get(
+        "port", {"mysql": 3306, "postgresql": 5432, "mssql": 1433}[engine])), key=prefix + "port")
+    if engine == "mysql":
+        modes = ["禁用SSL", "系统CA证书", "自定义证书", "强制SSL"]
+        mode = st.selectbox(t("ssl_mode_label"), modes,
+                            index=modes.index(current["ssl_mode"]) if current.get("ssl_mode") in modes else 1,
+                            key=prefix + "ssl")
+        connection.update(ssl_mode=mode, use_ssl=mode != modes[0], verify_ssl=mode in modes[1:3])
+        if mode == modes[2]:
+            for label in ("ssl_ca", "ssl_cert", "ssl_key"):
+                connection[label] = field(label, label)
     else:
-        st.subheader("AWS Athena 配置")
-        current = db_config.get("athena", {})
-        athena_config = {
-            "region": st.text_input("AWS Region", value=current.get("region", "us-east-1")),
-            "database": st.text_input("数据库名", value=current.get("database", "default")),
-            "catalog": st.text_input("Catalog", value=current.get("catalog", "AwsDataCatalog")),
-            "workgroup": st.text_input("Workgroup", value=current.get("workgroup", "primary")),
-            "s3_output_location": st.text_input("S3 Output Location", value=current.get("s3_output_location", "")),
-            "aws_access_key_id": st.text_input(
-                "AWS Access Key ID", value=current.get("aws_access_key_id", current.get("access_key", "")),
-                type="password",
-            ),
-            "aws_secret_access_key": st.text_input(
-                "AWS Secret Access Key", value=current.get("aws_secret_access_key", current.get("secret_key", "")),
-                type="password",
-            ),
-            "aws_session_token": st.text_input("AWS Session Token", value=current.get("aws_session_token", ""), type="password"),
-            "max_rows": st.number_input("最大返回行数", min_value=1, max_value=10000, value=current.get("max_rows", 1000)),
-            "query_timeout": st.number_input("查询超时(秒)", min_value=1, max_value=600, value=current.get("query_timeout", 240)),
-        }
-        st.caption("凭据留空时使用 AWS 默认凭据链；S3 输出位置也可由 Workgroup 配置。")
-    
-    # 测试连接和保存配置
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("🔍 测试连接", type="secondary"):
-            with st.spinner("测试连接中..."):
-                if db_type == "mysql":
-                    test_config = {
-                        "host": host,
-                        "port": port,
-                        "database": database,
-                        "username": username,
-                        "password": password,
-                        "max_rows": max_rows,
-                        "connection_timeout": connection_timeout,
-                        "max_connections": max_connections,
-                        "query_timeout": query_timeout,
-                        "ssl_mode": ssl_mode,
-                        "use_ssl": use_ssl,
-                        "verify_ssl": verify_ssl
-                    }
-                    
-                    # 添加SSL证书配置
-                    if ssl_mode == "自定义证书":
-                        test_config.update({
-                            "ssl_ca": ssl_ca,
-                            "ssl_cert": ssl_cert,
-                            "ssl_key": ssl_key
-                        })
-                else:
-                    test_config = athena_config
-                
-                # 测试基本连接
-                start_time = time.time()
-                tables_result = mcp_client.call_mcp_server_with_config(
-                    db_type, 
-                    "get_tables", 
-                    test_config
-                )
-                connection_time = time.time() - start_time
-                
-                if "error" in tables_result:
-                    st.error(f"❌ 连接失败: {tables_result['error']}")
-                else:
-                    result_data = tables_result.get("result", {})
-                    if result_data.get("success"):
-                        tables = result_data.get("tables", [])
-                        if isinstance(tables, list) and len(tables) > 0 and isinstance(tables[0], dict):
-                            # 新版本返回详细表信息
-                            table_count = len(tables)
-                            total_rows = sum(t.get("estimated_rows", 0) for t in tables)
-                            st.success(f"✅ 连接成功!")
-                            
-                            # 显示连接信息
-                            col_a, col_b, col_c = st.columns(3)
-                            with col_a:
-                                st.metric("连接时间", f"{connection_time:.2f}秒")
-                            with col_b:
-                                st.metric("表数量", table_count)
-                            with col_c:
-                                st.metric("预估总行数", f"{total_rows:,}")
-                            
-                            # 显示表信息
-                            if tables:
-                                st.subheader("数据库表信息")
-                                df = pd.DataFrame(tables)
-                                st.dataframe(df, width='stretch')
-                        else:
-                            # 兼容旧版本
-                            table_count = len(tables) if isinstance(tables, list) else 0
-                            st.success(f"✅ 连接成功! 发现 {table_count} 个表")
-                    else:
-                        st.error(f"❌ 获取表信息失败")
-    
-    with col2:
-        if st.button("💾 保存配置", type="primary"):
-            if db_type == "mysql":
-                save_config = {
-                    "host": host,
-                    "port": port,
-                    "database": database,
-                    "username": username,
-                    "password": password,
-                    "max_rows": max_rows,
-                    "connection_timeout": connection_timeout,
-                    "max_connections": max_connections,
-                    "query_timeout": query_timeout,
-                    "ssl_mode": ssl_mode,
-                    "use_ssl": use_ssl,
-                    "verify_ssl": verify_ssl
-                }
-                
-                # 添加SSL证书配置（仅在自定义证书模式下）
-                if ssl_mode == "自定义证书":
-                    save_config.update({
-                        "ssl_ca": ssl_ca,
-                        "ssl_cert": ssl_cert,
-                        "ssl_key": ssl_key
-                    })
-            else:
-                save_config = athena_config
-            
-            config_manager.save_database_config(db_type, save_config)
-            st.success("✅ 配置已保存!")
-            st.rerun()
-    
-    with col3:
-        if st.button("🗑️ 清除配置"):
-            config_manager.save_database_config(db_type, {})
-            st.success("✅ 配置已清除!")
-            st.rerun()
-
-with tab2:
-    st.subheader("数据库连接状态")
-    
-    if db_type in db_config and db_config[db_type]:
-        current_config = db_config[db_type]
-        
-        # 显示当前配置
-        st.subheader("当前配置")
-        config_display = {}
-        for key, value in current_config.items():
-            if key in ("password", "aws_access_key_id", "aws_secret_access_key", "aws_session_token",
-                       "access_key", "secret_key", "session_token"):
-                config_display[key] = "***" if value else ""
-            else:
-                config_display[key] = str(value)
-        
-        df_config = pd.DataFrame(list(config_display.items()), columns=["配置项", "值"])
-        st.dataframe(df_config, width='stretch')
-        
-        # 实时连接测试
-        if st.button("🔄 刷新连接状态"):
-            with st.spinner("检查连接状态..."):
-                # 获取数据库统计信息
-                stats_result = mcp_client.call_mcp_server_with_config(
-                    db_type,
-                    "get_database_stats" if db_type == "mysql" else "get_tables",
-                    current_config,
-                    {"database": current_config.get("database", "default")}
-                )
-                
-                if "error" not in stats_result and stats_result.get("result", {}).get("success"):
-                    stats = stats_result["result"].get("stats", {})
-                    if db_type == "athena":
-                        stats = {"table_count": len(stats_result["result"]["tables"])}
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("表数量", stats.get("table_count", 0))
-                    with col2:
-                        st.metric("总记录数", f"{stats['total_rows']:,}" if "total_rows" in stats else "—")
-                    with col3:
-                        st.metric("数据库大小", f"{stats['size_mb']} MB" if "size_mb" in stats else "—")
-                    
-                    st.success("✅ 数据库连接正常")
-                else:
-                    error_msg = stats_result.get("error", "未知错误")
-                    st.error(f"❌ 连接失败: {error_msg}")
-    else:
-        st.warning("⚠️ 尚未配置数据库连接")
-
-with tab3:
-    st.subheader("性能监控")
-    
-    if db_type in db_config and db_config[db_type]:
-        st.info("🚧 性能监控功能开发中...")
-        st.markdown("""
-        **计划中的功能:**
-        - 查询执行时间统计
-        - 慢查询分析
-        - 连接池状态监控
-        - 错误统计和分析
-        - 查询频率统计
-        """)
-        
-    else:
-        st.warning("⚠️ 请先配置数据库连接")
+        connection["schema"] = field("schema_name", "schema", "public" if engine == "postgresql" else "dbo")
+    if engine == "mssql":
+        connection["driver"] = field("odbc_driver", "driver", "ODBC Driver 18 for SQL Server")
+        connection["encrypt"] = field("encrypt", "encrypt", "yes")
+        connection["trust_server_certificate"] = field("trust_certificate", "trust_server_certificate", "no")
+        st.info(t("odbc_notice"))
+connection["max_rows"] = st.number_input(t("row_limit"), 1, 10000, int(current.get("max_rows", 1000)),
+                                          key=prefix + "rows")
+connection["query_timeout"] = st.number_input(t("query_timeout_label"), 1, 600,
+                                               int(current.get("query_timeout", 30)), key=prefix + "timeout")
+connection["connection_timeout"] = int(current.get("connection_timeout", 10))
+timezone = st.text_input(t("business_timezone"), value=source.get("timezone", "UTC"), key=prefix + "timezone")
+day_start = st.number_input(t("business_day_hour"), 0, 23, source.get("business_day_start", 0),
+                           key=prefix + "day")
+source = {**source, "name": name, "config": connection, "timezone": timezone, "business_day_start": day_start}
+adapter = DatabaseAdapter(source, MCPClient(config))
+left, right = st.columns(2)
+try:
+    if left.button(t("test_source")):
+        st.json(adapter.metadata())
+        st.success(t("connection_test_success"))
+    if right.button(t("save_source"), type="primary"):
+        config.save_datasource(source)
+        st.success(t("config_saved"))
+    if st.button(t("source_diagnostics")):
+        st.json(adapter.diagnostics())
+except (ValueError, RuntimeError) as exc:
+    st.error(str(exc))

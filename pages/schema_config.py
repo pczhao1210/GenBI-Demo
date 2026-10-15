@@ -5,6 +5,7 @@ import json
 from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
 from utils.i18n import t
+from utils.datasources import DatabaseAdapter
 
 st.set_page_config(page_title="Schema Configuration", page_icon="📋")
 st.title(t('database_schema_config'))
@@ -31,10 +32,18 @@ config_manager = ConfigManager()
 mcp_client = MCPClient()
 
 # 数据库选择
-database = st.selectbox(t('select_database'), ["mysql", "athena"])
+sources = config_manager.load_datasources()
+database = st.selectbox(t('select_database'), list(sources),
+                        format_func=lambda key: sources[key]["name"])
+if not database:
+    st.info(t("configure_source_hint"))
+    st.stop()
 
 # 获取数据库配置
-db_config = config_manager.load_database_config().get(database, {})
+datasource = sources[database]
+db_config = datasource["config"]
+engine = datasource["engine"]
+adapter = DatabaseAdapter(datasource, mcp_client)
 
 if not db_config:
     st.warning(t('config_db_connection_first').format(db_type=database.upper()))
@@ -65,7 +74,8 @@ with col1:
     if st.button(t('refresh_schema')):
         with st.spinner("正在获取表列表..."):
             try:
-                tables = mcp_client.get_tables(database, db_config)
+                tables = (mcp_client.get_tables(engine, db_config) if engine in ("mysql", "athena")
+                          else adapter.metadata()["tables"])
                 editor["tables"] = st.session_state.tables = tables
                 st.success(f"已获取{len(tables)}个表")
             except RuntimeError as exc:
@@ -111,11 +121,12 @@ with col2:
             with st.spinner("正在获取表结构..."):
                 try:
                     # 如果表名与数据库名相同，可能需要特殊处理
-                    if database == "athena" and selected_table == db_config.get("database"):
+                    if engine == "athena" and selected_table == db_config.get("database"):
                         st.info(f"注意: 表名与数据库名相同 ({selected_table})")
                     
                     # 尝试直接查询表结构
-                    fields = mcp_client.describe_table(database, db_config, selected_table)
+                    fields = (mcp_client.describe_table(engine, db_config, selected_table)
+                              if engine in ("mysql", "athena") else adapter.metadata(selected_table)["columns"])
                     
                     if fields:
                         st.session_state.table_fields[selected_table] = fields
@@ -125,12 +136,7 @@ with col2:
                         st.warning("尝试替代方法获取表结构...")
                         
                         # 执行查询获取列信息
-                        query_result = mcp_client.call_mcp_server_with_config(
-                            database,
-                            "execute_query",
-                            db_config,
-                            {"sql": f"SELECT * FROM {selected_table} LIMIT 1", "database": db_config.get("database")}
-                        )
+                        query_result = {"result": adapter.preview(selected_table, 1)}
                         
                         if "result" in query_result and "data" in query_result["result"]:
                             # 从查询结果中提取列信息
@@ -164,7 +170,7 @@ with col2:
                 
                 with st.expander(f"{field_name} ({field_type})"):
                     # 显示原始信息
-                    if database == "mysql":
+                    if engine == "mysql":
                         st.text(f"类型: {field.get('type', '')}")
                         st.text(f"允许NULL: {field.get('null', '')}")
                         st.text(f"键: {field.get('key', '')}")

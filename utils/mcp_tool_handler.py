@@ -76,6 +76,17 @@ class MCPToolCallHandler:
         
         # 根据工具名称路由到相应的执行函数
         try:
+            if tool_def.get("capability", "").startswith("database."):
+                from utils.config_manager import ConfigManager
+                from utils.datasources import DatabaseAdapter
+                source = ConfigManager().resolve_datasource(arguments["datasource_id"])
+                adapter = DatabaseAdapter(source, self.mcp_client)
+                capability = tool_def["capability"]
+                if capability == "database.query":
+                    return adapter.query(arguments["sql"])
+                if capability == "database.preview":
+                    return adapter.preview(arguments["table"])
+                return adapter.metadata(arguments.get("table"))
             if tool_name.startswith("athena_"):
                 return self._execute_athena_tool(tool_name, arguments)
             elif tool_name.startswith("mysql_"):

@@ -359,6 +359,23 @@ TRANSLATIONS["en"].update({
     "enable_on_demand": "Enable on-demand calls",
     "disable_server": "Disable calls",
 })
+for key, zh, en in [
+    ("source_connection", "连接", "Connection"), ("new_connection", "新增连接", "New connection"),
+    ("connection_name", "连接名称", "Connection name"), ("host", "主机", "Host"),
+    ("database", "数据库", "Database"), ("username", "用户名", "Username"),
+    ("password", "密码", "Password"), ("port", "端口", "Port"), ("schema_name", "Schema", "Schema"),
+    ("business_timezone", "业务时区", "Business timezone"), ("business_day_hour", "业务日起始小时", "Business day start hour"),
+    ("row_limit", "最大返回行数", "Maximum rows"), ("query_timeout_label", "查询超时（秒）", "Query timeout (seconds)"),
+    ("test_source", "🔍 测试连接", "Test connection"), ("save_source", "💾 保存配置", "Save connection"),
+    ("source_diagnostics", "能力与驱动诊断", "Capabilities and driver diagnostics"),
+    ("odbc_driver", "系统 ODBC 驱动", "System ODBC driver"), ("encrypt", "加密", "Encrypt"),
+    ("trust_certificate", "信任服务端证书", "Trust server certificate"),
+    ("odbc_notice", "MSSQL 需要系统安装 Microsoft ODBC Driver 18 和 unixODBC；Python 包不包含系统驱动。",
+     "MSSQL requires Microsoft ODBC Driver 18 and unixODBC installed on the host, not just the Python package."),
+    ("ssl_mode_label", "SSL 模式", "SSL mode"),
+    ("configure_source_hint", "请先在数据源页面添加连接；知识解释无需连接。", "Add a data source first; knowledge explanations do not require a connection."),
+]:
+    TRANSLATIONS["zh"][key], TRANSLATIONS["en"][key] = zh, en
 
 
 TRANSLATIONS["zh"].update({

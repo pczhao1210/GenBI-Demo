@@ -6,12 +6,17 @@ from pydantic import BaseModel, Field
 from utils.bi_service import BIService
 
 router = APIRouter()
-DatabaseType = Literal["mysql", "athena"]
+DatabaseType = str
 
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1)
-    database: DatabaseType
+    database: DatabaseType = "mysql"
+    datasource_id: str | None = None
+
+    @property
+    def source(self):
+        return self.datasource_id or self.database
 
 
 class GenerateSQLRequest(QueryRequest):
@@ -31,18 +36,18 @@ class ExecutePlanRequest(QueryRequest):
 
 @router.post("/query")
 def query_data(request: QueryRequest):
-    return BIService().query(request.question, request.database)
+    return BIService().query(request.question, request.source)
 
 
 @router.post("/analyze")
 def analyze_data(request: QueryRequest):
-    plan = BIService().analysis_plan(request.question, request.database)
+    plan = BIService().analysis_plan(request.question, request.source)
     return {"intent": "analysis", "analysis_chain": plan["steps"], "plan": plan, "status": "pending"}
 
 
 @router.post("/execute-plan")
 def execute_plan(request: ExecutePlanRequest):
-    return BIService().execute_plan(request.plan, request.question, request.database)
+    return BIService().execute_plan(request.plan, request.question, request.source)
 
 
 @router.post("/optimize-chain")
@@ -56,5 +61,5 @@ def optimize_chain(request: OptimizeChainRequest):
 
 @router.post("/generate-sql")
 def generate_sql(request: GenerateSQLRequest):
-    return {"sql": BIService().generate_sql(request.question, request.database),
+    return {"sql": BIService().generate_sql(request.question, request.source),
             "success": True, "error": None}

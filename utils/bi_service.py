@@ -6,6 +6,7 @@ from utils.config_manager import ConfigManager
 from utils.llm_client import LLMClient
 from utils.mcp_client import MCPClient, normalize_response
 from utils.sql_utils import clean_sql_response, validate_readonly_sql
+from utils.datasources import DatabaseAdapter
 
 
 def result_payload(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,35 +107,31 @@ class BIService:
         return self._llm
 
     def schema(self, database: str) -> Dict[str, Any]:
-        if database not in ("mysql", "athena"):
-            raise ValueError(f"Unsupported database: {database}")
-        schema = self.config.load_schema_config().get(database, {})
+        schema = self.config.resolve_datasource(database)["schema"]
         if not schema.get("tables"):
             raise ValueError(f"No schema configured for {database}")
         return schema
 
     def database_config(self, database: str) -> Dict[str, Any]:
-        if database not in ("mysql", "athena"):
-            raise ValueError(f"Unsupported database: {database}")
-        config = self.config.load_database_config().get(database, {})
+        config = self.config.resolve_datasource(database)["config"]
         if not config:
             raise ValueError(f"No connection configured for {database}")
         return config
 
     def sql_prompt(self, question: str, database: str) -> str:
         schema = self.schema(database)
-        return build_schema_prompt(question, schema["tables"], schema.get("descriptions", {}), database)
+        engine = self.config.resolve_datasource(database)["engine"]
+        return build_schema_prompt(question, schema["tables"], schema.get("descriptions", {}), engine)
 
     def generate_sql(self, question: str, database: str) -> str:
         response = self.llm.generate_sql(self.sql_prompt(question, database), request_type="query")
-        return validate_readonly_sql(clean_sql_response(response), database)
+        return validate_readonly_sql(clean_sql_response(response), self.config.resolve_datasource(database)["engine"])
 
     def query(self, question: str, database: str) -> Dict[str, Any]:
-        config = self.database_config(database)
+        self.database_config(database)
         sql = self.generate_sql(question, database)
-        result = result_payload(self.mcp.call_mcp_server_with_config(
-            database, "execute_query", config, {"sql": sql, "database": config.get("database")},
-        ))
+        source = self.config.resolve_datasource(database)
+        result = DatabaseAdapter(source, self.mcp).query(sql)
         data = result.get("data")
         if not isinstance(data, dict):
             raise RuntimeError("Query response is missing data")

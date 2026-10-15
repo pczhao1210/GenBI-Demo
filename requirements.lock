@@ -116,6 +116,10 @@ plotly==7.1.0
     # via -r requirements.txt
 protobuf==7.36.2
     # via streamlit
+psycopg==3.3.6
+    # via -r requirements.txt
+psycopg-binary==3.3.6 ; implementation_name != 'pypy'
+    # via psycopg
 pyarrow==26.0.0
     # via streamlit
 pyathena==4.1.0
@@ -132,6 +136,8 @@ pydeck==0.9.3
 pyee==14.0.0
     # via playwright
 pymysql==1.2.3
+    # via -r requirements.txt
+pyodbc==5.3.0
     # via -r requirements.txt
 python-dateutil==2.9.0.post0
     # via
@@ -185,6 +191,7 @@ typing-extensions==4.16.0
     #   httpx2
     #   openai
     #   opentelemetry-api
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   pyee
@@ -200,6 +207,7 @@ typing-inspection==0.4.4
 tzdata==2026.5
     # via
     #   pandas
+    #   psycopg
     #   pyathena
 urllib3==2.8.0
     # via
