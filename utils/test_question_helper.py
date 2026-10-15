@@ -161,12 +161,12 @@ def render_test_question_sidebar():
         elif selection_method == "随机选择":
             count = st.slider("随机问题数量", 1, 10, 5)
             if st.button("🎲 生成随机问题"):
-                random_questions = helper.get_random_questions(count)
-                
+                st.session_state.random_questions = helper.get_random_questions(count)
+            if st.session_state.get("random_questions"):
                 st.write("**随机问题：**")
-                for i, (cat, q_id, question) in enumerate(random_questions, 1):
+                for i, (cat, q_id, question) in enumerate(st.session_state.random_questions, 1):
                     if st.button(f"{i}. {question[:30]}...", key=f"random_{i}"):
-                        selected_question = question
+                        st.session_state.selected_test_question = question
         
         elif selection_method == "按难度选择":
             difficulty = st.selectbox("选择难度", ["简单", "中等", "困难"])
@@ -174,12 +174,15 @@ def render_test_question_sidebar():
             
             if questions:
                 # 随机显示5个该难度的问题
-                sample_questions = random.sample(questions, min(5, len(questions)))
+                sample_key = f"difficulty_questions_{difficulty}"
+                if sample_key not in st.session_state:
+                    st.session_state[sample_key] = random.sample(questions, min(5, len(questions)))
+                sample_questions = st.session_state[sample_key]
                 
                 st.write(f"**{difficulty}问题：**")
                 for i, (cat, q_id, question) in enumerate(sample_questions, 1):
                     if st.button(f"{q_id}. {question[:30]}...", key=f"diff_{i}"):
-                        selected_question = question
+                        st.session_state.selected_test_question = question
         
         # 快速输入按钮
         if selected_question and st.button("📝 快速输入", type="primary"):

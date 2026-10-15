@@ -1,4 +1,7 @@
 import streamlit as st
+import copy
+import hashlib
+import json
 from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
 from utils.i18n import t
@@ -37,19 +40,22 @@ if not db_config:
     st.warning(t('config_db_connection_first').format(db_type=database.upper()))
     st.stop()
 
-# 初始化session state
-if "tables" not in st.session_state:
-    st.session_state.tables = []
-if "table_fields" not in st.session_state:
-    st.session_state.table_fields = {}
-if "table_descriptions" not in st.session_state:
-    st.session_state.table_descriptions = {}
-
-# 加载已保存的schema配置
-schema_config = config_manager.load_schema_config().get(database, {})
-if schema_config:
-    st.session_state.table_fields.update(schema_config.get("tables", {}))
-    st.session_state.table_descriptions.update(schema_config.get("descriptions", {}))
+source = database + hashlib.sha256(json.dumps(db_config, sort_keys=True).encode()).hexdigest()
+editors = st.session_state.setdefault("schema_editors", {})
+if source not in editors:
+    schema_config = config_manager.load_schema_config().get(database, {})
+    editors[source] = {
+        "tables": [], "fields": {
+            table: copy.deepcopy(info.get("columns", []) if isinstance(info, dict) else info)
+            for table, info in schema_config.get("tables", {}).items()
+        },
+        "descriptions": copy.deepcopy(schema_config.get("descriptions", {})), "revision": 0,
+    }
+editor = editors[source]
+st.session_state.tables = editor["tables"]
+st.session_state.table_fields = editor["fields"]
+st.session_state.table_descriptions = editor["descriptions"]
+widget_prefix = f"{source}_{editor['revision']}"
 
 col1, col2 = st.columns([1, 2])
 
@@ -58,12 +64,12 @@ with col1:
     
     if st.button(t('refresh_schema')):
         with st.spinner("正在获取表列表..."):
-            tables = mcp_client.get_tables(database, db_config)
-            if tables:
-                st.session_state.tables = tables
+            try:
+                tables = mcp_client.get_tables(database, db_config)
+                editor["tables"] = st.session_state.tables = tables
                 st.success(f"已获取{len(tables)}个表")
-            else:
-                st.error("获取表列表失败，请检查数据库连接")
+            except RuntimeError as exc:
+                st.error(str(exc))
     
     if st.session_state.tables:
         # 检查tables是字典列表还是字符串列表
@@ -94,7 +100,10 @@ with col2:
         st.subheader(f"{t('table_details')}: {selected_table}")
         
         # 表描述
-        description = st.text_area(t('table_description'), value=st.session_state.table_descriptions.get(selected_table, ""))
+        description = st.text_area(
+            t('table_description'), value=st.session_state.table_descriptions.get(selected_table, ""),
+            key=f"{widget_prefix}_{selected_table}_description",
+        )
         st.session_state.table_descriptions[selected_table] = description
         
         # 获取表字段
@@ -169,7 +178,7 @@ with col2:
                     new_desc = st.text_input(
                         t('custom_description'), 
                         value=field.get("comment", ""), 
-                        key=f"desc_{selected_table}_{i}"
+                        key=f"{widget_prefix}_desc_{selected_table}_{i}"
                     )
                     # 更新字段描述
                     if new_desc != field.get("comment", ""):
@@ -248,8 +257,10 @@ with col1:
 
 with col2:
     if st.button("🗑️ 清空配置"):
+        config_manager.save_schema_config(database, {"tables": {}, "descriptions": {}})
         st.session_state.table_fields.clear()
         st.session_state.table_descriptions.clear()
+        editor["revision"] += 1
         st.success("✅ 已清空所有配置")
         st.rerun()
 

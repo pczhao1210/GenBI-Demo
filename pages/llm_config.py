@@ -19,13 +19,13 @@ llm_config = config_manager.load_llm_config()
 # LLM提供商选择
 provider = st.selectbox(
     t('select_provider'),
-    ["openai", "azure_openai", "custom"],
-    index=["openai", "azure_openai", "custom"].index(llm_config.get("provider", "openai"))
+    ["openai", "azure_openai", "custom", "openai_sdk"],
+    index=["openai", "azure_openai", "custom", "openai_sdk"].index(llm_config.get("provider", "openai"))
 )
 
 st.subheader(t('config_params'))
 
-if provider == "openai":
+if provider in ("openai", "openai_sdk"):
     st.markdown(f"### {t('openai_config')}")
     api_key = st.text_input("API Key", value=llm_config.get("openai", {}).get("api_key", ""), type="password")
     base_url = st.text_input("Base URL", value=llm_config.get("openai", {}).get("base_url", "https://api.openai.com/v1"))
@@ -136,6 +136,7 @@ with col1:
             # 创建临时配置进行测试
             test_config = {
                 "provider": provider,
+                "timeout": timeout_config,
                 "parameters": {
                     "temperature": temperature,
                     "max_tokens": max_tokens
@@ -143,7 +144,7 @@ with col1:
             }
             
             # 根据提供商添加相应配置
-            if provider == "openai":
+            if provider in ("openai", "openai_sdk"):
                 test_config["openai"] = {
                     "api_key": api_key,
                     "base_url": base_url,
@@ -158,6 +159,7 @@ with col1:
                 }
             else:  # custom
                 test_config["custom"] = {
+                    **llm_config.get("custom", {}),
                     "base_url": base_url,
                     "api_key": api_key,
                     "model": model
@@ -184,7 +186,7 @@ with col1:
                     st.info(t('model_response'))
                     st.text_area(t('response_content'), value=response, height=150, disabled=True, label_visibility="collapsed")
                 else:
-                    st.warning(t('connection_success_unexpected'))
+                    st.info(t('connection_success_unexpected'))
                     st.text_area(t('response_content'), value=response, height=150, disabled=True, label_visibility="collapsed")
             except Exception as e:
                 st.error(f"{t('connection_test_failed')}: {str(e)}")
@@ -193,6 +195,7 @@ with col1:
 with col2:
     if st.button(t('save_config'), type="primary"):
         new_config = {
+            **llm_config,
             "provider": provider,
             "parameters": {
                 "temperature": temperature,
@@ -201,11 +204,11 @@ with col2:
         }
         
         # 添加超时配置
-        if timeout_config:
-            new_config["timeout"] = timeout_config
+        new_config["timeout"] = timeout_config
         
-        if provider == "openai":
+        if provider in ("openai", "openai_sdk"):
             new_config["openai"] = {
+                **llm_config.get("openai", {}),
                 "api_key": api_key,
                 "base_url": base_url,
                 "model": model,
@@ -213,12 +216,14 @@ with col2:
             }
         elif provider == "azure_openai":
             new_config["azure_openai"] = {
+                **llm_config.get("azure_openai", {}),
                 "api_key": api_key,
                 "endpoint": endpoint,
                 "deployment_name": deployment_name
             }
         else:  # custom
             new_config["custom"] = {
+                **llm_config.get("custom", {}),
                 "base_url": base_url,
                 "api_key": api_key,
                 "model": model

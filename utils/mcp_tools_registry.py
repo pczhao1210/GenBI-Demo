@@ -118,13 +118,13 @@ class MCPToolRegistry:
         # 3. MySQL数据库查询工具
         self.register_tool({
             "name": "mysql_query",
-            "description": "Execute SQL queries against MySQL databases with connection pooling and transaction support. Optimized for OLTP workloads.",
+            "description": "Execute one read-only SELECT or WITH query against MySQL with bounded result rows.",
             "inputSchema": {
                 "type": "object", 
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "SQL query to execute. Supports SELECT, INSERT, UPDATE, DELETE operations."
+                        "description": "One read-only SQL query, including SELECT and WITH queries."
                     },
                     "config": {
                         "type": "object",
@@ -159,7 +159,7 @@ class MCPToolRegistry:
             },
             "annotations": {
                 "audience": ["developers", "data_analysts"],
-                "destructiveHint": True  # 因为支持INSERT/UPDATE/DELETE
+                "destructiveHint": False
             }
         })
         
@@ -226,12 +226,6 @@ class MCPToolRegistry:
                         "default": 5,
                         "minimum": 1,
                         "maximum": 20
-                    },
-                    "time_range": {
-                        "type": "string",
-                        "description": "Time period for search results",
-                        "enum": ["any", "day", "week", "month", "year"],
-                        "default": "any"
                     }
                 },
                 "required": ["query"]
@@ -277,17 +271,6 @@ class MCPToolRegistry:
                     "url": {
                         "type": "string",
                         "description": "URL of the web page to fetch. Must be a valid HTTP/HTTPS URL."
-                    },
-                    "wait_for_content": {
-                        "type": "boolean",
-                        "description": "Wait for dynamic content to load",
-                        "default": True
-                    },
-                    "extract_format": {
-                        "type": "string",
-                        "description": "Format for extracted content",
-                        "enum": ["text", "html", "markdown"],
-                        "default": "text"
                     }
                 },
                 "required": ["url"]
@@ -322,6 +305,7 @@ class MCPToolRegistry:
         
         # 验证工具定义符合MCP规范
         self._validate_tool_definition(tool_def)
+        tool_def["inputSchema"].setdefault("additionalProperties", False)
         
         self.tools[name] = tool_def
     

@@ -11,6 +11,23 @@ import time
 from pymysql.connections import Connection
 from typing import Dict, Any, List, Optional
 import logging
+from datetime import date, datetime, time as datetime_time, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.sql_utils import validate_readonly_sql
+import sqlglot
+
+
+def serialize_value(value):
+    if isinstance(value, (Decimal, timedelta)):
+        return str(value)
+    if isinstance(value, (date, datetime, datetime_time)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    raise TypeError(f"Unsupported database value type: {type(value).__name__}")
 
 # 自定义连接池异常
 class PoolError(Exception):
@@ -48,7 +65,7 @@ class MySQLConnectionPool:
                 'charset': 'utf8mb4',
                 'autocommit': True,
                 'connect_timeout': self.config.get('connection_timeout', 10),
-                'read_timeout': self.config.get('read_timeout', 30),
+                'read_timeout': self.config.get('query_timeout', self.config.get('read_timeout', 30)),
                 'write_timeout': self.config.get('write_timeout', 30)
             }
             
@@ -122,7 +139,7 @@ class MySQLServerOptimized:
         """初始化MySQL连接池"""
         self.config = config
         try:
-            self.pool = MySQLConnectionPool(config)
+            self.pool = MySQLConnectionPool(config, config.get("max_connections", 5))
             # 测试连接
             conn = self.pool.get_connection()
             self.pool.return_connection(conn)
@@ -136,27 +153,34 @@ class MySQLServerOptimized:
         if not self.pool:
             return {"error": "MySQL连接池未初始化"}
         
-        # SQL安全检查
-        if self._is_dangerous_sql(sql):
-            return {"error": "检测到危险SQL操作，查询被拒绝"}
+        try:
+            sql = validate_readonly_sql(sql, "mysql")
+            max_rows = int(self.config.get("max_rows", 1000))
+            if max_rows <= 0:
+                raise ValueError("max_rows must be positive")
+            tree = sqlglot.parse_one(sql, read="mysql")
+            limit = tree.args.get("limit")
+            if limit is None or not limit.expression.is_int or int(limit.expression.this) > max_rows + 1:
+                sql = tree.limit(max_rows + 1).sql(dialect="mysql")
+        except ValueError as exc:
+            return {"error": str(exc)}
         
         last_error = None
         for attempt in range(max_retries):
             conn = None
             try:
                 conn = self.pool.get_connection()
-                with conn.cursor() as cursor:
+                with conn.cursor(pymysql.cursors.SSCursor) as cursor:
                     start_time = time.time()
                     cursor.execute(sql)
                     execution_time = time.time() - start_time
                     
-                    if sql.strip().upper().startswith('SELECT'):
+                    if cursor.description is not None:
                         # 查询操作
                         columns = [desc[0] for desc in cursor.description]
-                        rows = cursor.fetchall()
+                        rows = cursor.fetchmany(max_rows + 1)
                         
                         # 应用行数限制
-                        max_rows = self.config.get('max_rows', 1000)
                         total_rows = len(rows)
                         if total_rows > max_rows:
                             rows = rows[:max_rows]
@@ -170,11 +194,13 @@ class MySQLServerOptimized:
                             formatted_row = []
                             for value in row:
                                 # 处理Decimal类型
-                                if hasattr(value, '__class__') and 'Decimal' in str(type(value)):
-                                    formatted_row.append(float(value))
+                                if isinstance(value, Decimal):
+                                    formatted_row.append(str(value))
                                 # 处理日期时间类型
-                                elif hasattr(value, 'strftime'):
+                                elif isinstance(value, (date, datetime, datetime_time)):
                                     formatted_row.append(value.isoformat())
+                                elif isinstance(value, timedelta):
+                                    formatted_row.append(str(value))
                                 # 处理bytes类型
                                 elif isinstance(value, bytes):
                                     try:
@@ -192,14 +218,14 @@ class MySQLServerOptimized:
                                 "columns": columns,
                                 "rows": formatted_rows,
                                 "row_count": len(formatted_rows),
-                                "total_rows": total_rows,
+                                "total_rows": None if truncated else total_rows,
                                 "truncated": truncated,
                                 "execution_time": round(execution_time, 3)
                             }
                         }
                         
                         if truncated:
-                            result["warning"] = f"结果已截断，仅显示前{max_rows}行，共{total_rows}行"
+                            result["warning"] = f"结果已截断，仅显示前{max_rows}行"
                         
                         return result
                     else:
@@ -223,16 +249,11 @@ class MySQLServerOptimized:
     
     def _is_dangerous_sql(self, sql: str) -> bool:
         """检测危险SQL操作"""
-        dangerous_keywords = [
-            'INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 
-            'TRUNCATE', 'REPLACE', 'MERGE', 'GRANT', 'REVOKE', 'SET'
-        ]
-        
-        sql_upper = sql.upper().strip()
-        for keyword in dangerous_keywords:
-            if sql_upper.startswith(keyword):
-                return True
-        return False
+        try:
+            validate_readonly_sql(sql, "mysql")
+            return False
+        except ValueError:
+            return True
     
     def get_tables(self) -> Dict[str, Any]:
         """获取数据库表列表，包含表类型和注释"""
@@ -394,7 +415,7 @@ class MySQLServerOptimized:
                         "size_mb": row[2] or 0
                     }
                 }
-            return {"success": True, "stats": {"table_count": 0, "total_rows": 0, "size_mb": 0}}
+            return {"error": result.get("error", "Database statistics query returned no rows")}
         except Exception as e:
             return {"error": f"获取数据库统计信息时出错: {str(e)}"}
 
@@ -452,7 +473,7 @@ def main():
         try:
             request = json.loads(line.strip())
             response = handle_mcp_request(request)
-            print(json.dumps(response))
+            print(json.dumps(response, default=serialize_value))
             sys.stdout.flush()
         except json.JSONDecodeError:
             print(json.dumps({"error": "无效的JSON请求"}))

@@ -11,8 +11,11 @@
       "region": "us-east-1",
       "database": "your_database",
       "s3_output_location": "s3://your-bucket/query-results/",
-      "access_key": "your_access_key",
-      "secret_key": "your_secret_key"
+      "aws_access_key_id": "your_access_key",
+      "aws_secret_access_key": "your_secret_key",
+      "workgroup": "primary",
+      "query_timeout": 240,
+      "max_rows": 1000
     }
   }
 }

@@ -1,96 +1,48 @@
-# 配置文件说明 - Config Directory
+# 配置说明
 
-本目录包含GenBI系统的所有配置文件，分为**实际配置**和**模板示例**两类。
+实际配置由页面保存，已排除在版本控制之外；`example_*.json` 只包含占位符。
+不要提交真实凭据。配置文件位置相对于仓库根目录，不随启动工作目录变化。
 
-## 📁 文件结构
+| 文件 | 用途 |
+|---|---|
+| `database_config.json` | MySQL / Athena 连接配置，根键 `databases` |
+| `llm_config.json` | LLM 配置，根键 `llm_config` |
+| `schema_config.json` | 表结构和业务描述，根键 `schemas` |
+| `mcp_config.json` | 内置 stdio RPC 脚本配置，根键 `mcp_servers` |
 
-```
-config/
-├── 📄 README.md                     # 本说明文档
-├── 
-├── 🔧 实际配置文件 (运行时使用)
-│   ├── 🗄️ database_config.json      # 数据库连接配置
-│   ├── 🤖 llm_config.json           # LLM服务配置  
-│   ├── 🔧 mcp_config.json           # MCP服务器配置
-│   └── 📋 schema_config.json        # 数据库表结构配置
-├── 
-└── 📋 配置模板 (供参考和初始化)
-    ├── 📄 example_database_config.json  # 数据库配置模板
-    ├── 📄 example_llm_config.json      # LLM配置模板
-    └── 📄 example_mcp_config.json      # MCP服务器配置模板
-```
+缺少 LLM、数据库或 Schema 配置时明确报错，不自动使用模板中的假凭据。
+工具配置仅在文件不存在时从[示例](example_mcp_config.json)初始化；
+显式保存空工具列表不会恢复已删除的工具。
 
-## 🔧 实际配置文件
+配置写入采用同目录临时文件和原子替换。数据库 / Schema 读改写使用文件锁，
+防止并发保存不同类型时覆盖彼此。`*.lock` 文件是锁元数据，不需要提交或备份。
+JSON 损坏会显式报错，不会静默重置配置。
 
-### `database_config.json`
-- **用途**: 存储MySQL和AWS Athena数据库连接信息
-- **包含**: 主机地址、端口、凭据、SSL设置等
-- **管理**: 通过"数据库配置"页面进行可视化配置
+## Athena
 
-### `llm_config.json` 
-- **用途**: 存储大语言模型服务配置
-- **支持**: OpenAI、Azure OpenAI、自定义API提供商
-- **包含**: API密钥、模型名称、参数设置、超时配置
-- **管理**: 通过"LLM配置"页面进行设置
+[数据库模板](example_database_config.json)使用标准键：
+`region`、`database`、`aws_access_key_id`、`aws_secret_access_key`、
+`aws_session_token`（可选）、`workgroup`、`s3_output_location`、`max_rows`、
+`query_timeout`。旧的 `access_key` / `secret_key` 仍可读取。
+凭据留空时使用默认 AWS 凭据链。S3 输出位置也可以由 Workgroup 配置。
 
-### `mcp_config.json`
-- **用途**: 存储Model Context Protocol服务器配置
-- **功能**: 管理数据库、Web搜索等工具服务器
-- **包含**: 服务器命令、参数、状态、能力描述
-- **管理**: 通过"MCP管理"页面进行动态配置
+## LLM
 
-### `schema_config.json`
-- **用途**: 存储数据库表结构和字段描述信息
-- **功能**: 为AI提供准确的数据库上下文
-- **包含**: 表名、字段名、数据类型、业务描述
-- **管理**: 通过"Schema配置"页面进行可视化编辑
+[LLM 模板](example_llm_config.json)展示三个 HTTP 提供商。
+`provider: "openai_sdk"` 使用 `openai` 配置段和实例级 SDK 客户端。
+自定义请求模板、认证头和响应路径可在 JSON 中配置；页面保存时保留高级字段。
+超时可为秒数，也可为 `query` / `analysis` / `default` 字典；空字典使用自动超时。
 
-## 📋 配置模板文件
+## Schema
 
-### `example_database_config.json`
-- **作用**: 提供数据库配置的标准模板
-- **用法**: 复制并修改为实际配置
-- **包含**: MySQL和Athena的配置示例
+当前 MySQL、Athena 各保存一套 Schema，不支持同类型的多个独立数据库配置。
+连接变更后需要重新获取和保存 Schema。页面编辑状态按连接隔离，
+只在首次进入该连接时载入磁盘配置，不会每次重跑覆盖未保存编辑。
+“清空配置”会持久清空当前数据库类型的表结构和描述。
 
-### `example_llm_config.json`
-- **作用**: 提供LLM配置的完整模板
-- **用法**: 展示所有支持的提供商和参数选项
-- **包含**: OpenAI、Azure OpenAI、自定义API的配置示例
+## 工具
 
-### `example_mcp_config.json`
-- **作用**: 提供MCP服务器的默认配置模板
-- **用法**: 系统初始化时自动使用
-- **包含**: 内置MCP服务器的标准配置
-
-## 🔒 安全注意事项
-
-- ✅ **实际配置文件**已在`.gitignore`中排除，不会提交到版本控制
-- ✅ **模板文件**可以安全提交，不包含敏感信息
-- ⚠️ **不要**在模板文件中放置真实的API密钥或密码
-- 🔐 **定期更新**API密钥和数据库密码以确保安全
-
-## 🛠️ 配置管理
-
-### 首次设置
-1. 复制对应的example文件为实际配置文件
-2. 编辑配置文件填入真实信息
-3. 或通过Web界面进行可视化配置
-
-### 备份与恢复
-```bash
-# 备份配置
-cp config/*.json backup/
-
-# 恢复配置  
-cp backup/*.json config/
-```
-
-### 重置为默认
-```bash
-# 删除实际配置，系统将使用默认模板
-rm config/database_config.json config/llm_config.json
-```
-
----
-
-**GenBI配置系统** - 简单、安全、可视化的配置管理！ ⚙️
+`status: "active"` 允许按需调用，`inactive` 禁止业务调用；
+脚本信息探测不受启用状态影响。首次初始化默认启用三个内置工具。
+支持实际的 `command` / `args` 配置和可选的进程 `timeout`（秒）。
+当前只支持内部 stdio RPC，不支持 SSE 或完整 MCP 协议。

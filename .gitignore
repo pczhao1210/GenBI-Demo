@@ -41,6 +41,7 @@ config/llm_config.json
 config/database_config.json
 config/schema_config.json
 config/mcp_config.json
+config/*.lock
 !config/example_*.json
 
 # Logs

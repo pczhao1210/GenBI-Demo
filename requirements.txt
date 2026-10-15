@@ -1,4 +1,4 @@
-streamlit>=1.25.0
+streamlit>=1.49.0,<2.0
 fastapi>=0.100.0
 uvicorn>=0.20.0
 pydantic>=2.0.0
@@ -12,3 +12,7 @@ PyMySQL>=1.0.0
 openai>=1.0.0
 python-dotenv>=0.19.0
 boto3>=1.26.0
+filelock>=3.12.0,<4.0
+sqlglot>=25.0.0,<30.0
+playwright>=1.40.0,<2.0
+jsonschema>=4.0.0,<5.0

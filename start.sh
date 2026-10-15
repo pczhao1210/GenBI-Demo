@@ -1,61 +1,50 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-# GenBI 一键启动脚本
-# 使用方法: ./start.sh [--language=English]
-
-# 解析命令行参数
-LANGUAGE_ARG=""
-for arg in "$@"; do
-    if [[ $arg == --language=* ]]; then
-        LANGUAGE_ARG="$arg"
-        break
-    fi
-done
-
-echo "🚀 启动 GenBI 生成式BI查询系统..."
-
-# 检查虚拟环境
-if [ ! -d ".venv" ]; then
-    echo "❌ 虚拟环境不存在，请先运行: python3 -m venv .venv"
+PYTHON="$PWD/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "Create the environment first: python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt"
     exit 1
 fi
 
-# 激活虚拟环境
-echo "📦 激活虚拟环境..."
-source .venv/bin/activate
+BACKEND_PID=""
+FRONTEND_PID=""
+cleanup() {
+    trap - EXIT INT TERM
+    if [[ -n "$FRONTEND_PID" ]]; then kill "$FRONTEND_PID" 2>/dev/null || true; fi
+    if [[ -n "$BACKEND_PID" ]]; then kill "$BACKEND_PID" 2>/dev/null || true; fi
+    wait || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# 安装依赖
-echo "📥 安装依赖包..."
-pip install -r requirements.txt
+wait_ready() {
+    local pid="$1" url="$2"
+    for ((attempt=0; attempt<60; attempt++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Service exited before becoming ready: $url"
+            return 1
+        fi
+        if curl --silent --fail --connect-timeout 1 --max-time 2 "$url" >/dev/null; then
+            kill -0 "$pid" 2>/dev/null && return 0
+        fi
+        sleep 1
+    done
+    echo "Service readiness timed out: $url"
+    return 1
+}
 
-# 启动后端服务
-echo "🔧 启动后端API服务..."
-cd backend
-uvicorn main:app --reload --port 8000 &
+BACKEND_PORT="${GENBI_BACKEND_PORT:-8000}"
+FRONTEND_PORT="${GENBI_FRONTEND_PORT:-8501}"
+"$PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
-cd ..
-
-# 等待后端启动
-sleep 3
-
-# 启动前端服务
-echo "🎨 启动前端Streamlit应用..."
-if [ -n "$LANGUAGE_ARG" ]; then
-    echo "🌍 使用语言参数: $LANGUAGE_ARG"
-    streamlit run app.py --server.port 8501 -- $LANGUAGE_ARG &
-else
-    streamlit run app.py --server.port 8501 &
-fi
+wait_ready "$BACKEND_PID" "http://127.0.0.1:$BACKEND_PORT/health"
+"$PYTHON" -m streamlit run app.py --server.address 127.0.0.1 --server.port "$FRONTEND_PORT" -- "$@" &
 FRONTEND_PID=$!
-
-echo ""
-echo "✅ 服务启动完成！"
-echo "📱 前端界面: http://localhost:8501"
-echo "📚 API文档: http://localhost:8000/docs"
-echo "❤️  API状态: http://localhost:8000/health"
-echo ""
-echo "按 Ctrl+C 停止所有服务"
-
-# 等待用户中断
-trap "echo '🛑 正在停止服务...'; kill $BACKEND_PID $FRONTEND_PID; exit" INT
-wait
+wait_ready "$FRONTEND_PID" "http://127.0.0.1:$FRONTEND_PORT/_stcore/health"
+echo "Frontend: http://localhost:$FRONTEND_PORT"
+echo "API docs: http://localhost:$BACKEND_PORT/docs"
+echo "Press Ctrl+C to stop both services."
+wait -n "$BACKEND_PID" "$FRONTEND_PID"

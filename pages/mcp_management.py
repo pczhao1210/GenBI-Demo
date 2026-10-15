@@ -2,9 +2,11 @@ import streamlit as st
 from utils.config_manager import ConfigManager
 from utils.i18n import t
 from utils.mcp_client import MCPClient
+import shlex
 
 st.set_page_config(page_title="MCP Management", page_icon="🔧")
 st.title(t('mcp_tool_management'))
+st.info("本页启用/禁用按需 stdio 调用，不启动常驻服务。当前支持内置换行 JSON RPC，不支持 SSE 或完整 MCP 握手。")
 
 config_manager = ConfigManager()
 mcp_client = MCPClient()
@@ -41,7 +43,7 @@ with col2:
 st.subheader(t('add_mcp_server'))
 with st.expander(t('new_server')):
     name = st.text_input(t('server_name'))
-    server_type = st.selectbox(t('type'), ["stdio", "sse"])
+    server_type = st.selectbox(t('type'), ["stdio"])
     
     if server_type == "stdio":
         command = st.text_input(t('command'), value="python")
@@ -56,7 +58,12 @@ with st.expander(t('new_server')):
                 "status": "inactive"
             }
             if server_type == "stdio":
-                new_server.update({"command": command, "args": args.split()})
+                try:
+                    parsed_args = shlex.split(args)
+                except ValueError as exc:
+                    st.error(str(exc))
+                    st.stop()
+                new_server.update({"command": command, "args": parsed_args})
             else:
                 new_server["url"] = url
             
@@ -114,7 +121,7 @@ else:
                 if st.button("🔍 检查状态", key=f"check_{name}"):
                     server_info = mcp_client.get_server_info(name)
                     if "error" not in server_info:
-                        st.success(f"✅ {name} 服务器运行正常")
+                        st.success(f"✅ {name} 脚本可响应；数据库连接需单独测试")
                         # 更新配置中的信息
                         mcp_config[name].update({
                             "description": server_info.get("description", config.get("description", "")),
@@ -128,17 +135,17 @@ else:
                         st.error(f"❌ {name} 服务器检查失败: {server_info.get('error', '未知错误')}")
             
             with col2:
-                if st.button(t('start'), key=f"start_{name}"):
+                if st.button(t('enable_on_demand'), key=f"start_{name}"):
                     mcp_config[name]["status"] = "active"
                     config_manager.save_mcp_config(mcp_config)
-                    st.success(f"{name} {t('started')}")
+                    st.success(f"{name}: {t('enable_on_demand')}")
                     st.rerun()
             
             with col3:
-                if st.button(t('stop'), key=f"stop_{name}"):
+                if st.button(t('disable_server'), key=f"stop_{name}"):
                     mcp_config[name]["status"] = "inactive"
                     config_manager.save_mcp_config(mcp_config)
-                    st.success(f"{name} {t('stopped')}")
+                    st.success(f"{name}: {t('disable_server')}")
                     st.rerun()
             
             with col4:

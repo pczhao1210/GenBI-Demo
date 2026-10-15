@@ -7,14 +7,15 @@
 import json
 import sys
 from typing import Dict, Any, List, Optional
+from jsonschema import Draft202012Validator
 from utils.mcp_tools_registry import mcp_tool_registry
 from utils.mcp_client import MCPClient
 
 class MCPToolCallHandler:
     """处理符合MCP协议的工具调用"""
     
-    def __init__(self):
-        self.mcp_client = MCPClient()
+    def __init__(self, mcp_client=None):
+        self.mcp_client = mcp_client or MCPClient()
         self.tool_registry = mcp_tool_registry
     
     def generate_tool_definitions_for_llm(self) -> List[Dict[str, Any]]:
@@ -95,28 +96,9 @@ class MCPToolCallHandler:
     def _validate_arguments(self, schema: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
         """验证工具参数是否符合schema定义"""
         try:
-            # 简化的JSON Schema验证
-            required_fields = schema.get("required", [])
-            properties = schema.get("properties", {})
-            
-            # 检查必需字段
-            for field in required_fields:
-                if field not in arguments:
-                    return {
-                        "valid": False,
-                        "error": f"缺少必需参数: {field}"
-                    }
-            
-            # 检查字段类型
-            for field, value in arguments.items():
-                if field in properties:
-                    expected_type = properties[field].get("type")
-                    if expected_type and not self._check_type(value, expected_type):
-                        return {
-                            "valid": False,
-                            "error": f"参数 {field} 类型不匹配，期望: {expected_type}"
-                        }
-            
+            errors = list(Draft202012Validator(schema).iter_errors(arguments))
+            if errors:
+                return {"valid": False, "error": errors[0].message}
             return {"valid": True}
         except Exception as e:
             return {
@@ -155,16 +137,16 @@ class MCPToolCallHandler:
                 {"sql": sql, "database": database}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "QUERY_FAILED"
                 }
             
             return {
                 "success": True,
-                "data": result.get("result", {}),
+                "data": result["result"]["data"],
                 "tool": tool_name,
                 "execution_metadata": {
                     "database": database,
@@ -183,10 +165,10 @@ class MCPToolCallHandler:
                 {"table_name": table_name, "database": database}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "DESCRIBE_FAILED"
                 }
             
@@ -214,16 +196,16 @@ class MCPToolCallHandler:
                 {"sql": sql}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "QUERY_FAILED"
                 }
             
             return {
                 "success": True,
-                "data": result.get("result", {}),
+                "data": result["result"]["data"],
                 "tool": tool_name,
                 "execution_metadata": {
                     "query_length": len(sql),
@@ -241,10 +223,10 @@ class MCPToolCallHandler:
                 {"table_name": table_name}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "DESCRIBE_FAILED"
                 }
             
@@ -270,16 +252,16 @@ class MCPToolCallHandler:
                 {"query": query, "max_results": max_results}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "SEARCH_FAILED"
                 }
             
             return {
                 "success": True,
-                "results": result.get("result", []),
+                "results": result["result"].get("results", []),
                 "tool": tool_name,
                 "search_metadata": {
                     "query": query,
@@ -296,16 +278,17 @@ class MCPToolCallHandler:
                 {"url": url}
             )
             
-            if "error" in result:
+            if "error" in result or "error" in result.get("result", {}):
                 return {
                     "success": False,
-                    "error": result["error"],
+                    "error": result.get("error") or result["result"]["error"],
                     "code": "FETCH_FAILED"
                 }
             
             return {
                 "success": True,
-                "content": result.get("result", {}),
+                "content": result["result"].get("content", ""),
+                "metadata": {key: value for key, value in result["result"].items() if key != "content"},
                 "tool": tool_name,
                 "execution_metadata": {
                     "url": url

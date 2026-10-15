@@ -8,6 +8,7 @@ import sys
 import asyncio
 from playwright.async_api import async_playwright
 import logging
+from urllib.parse import urlencode
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,7 @@ class PlaywrightServer:
     
     async def search_web(self, query: str, max_results: int = 5):
         """网页搜索功能"""
+        page = None
         try:
             if not self.browser:
                 await self.initialize()
@@ -37,7 +39,7 @@ class PlaywrightServer:
             page = await self.browser.new_page()
             
             # 使用Google搜索
-            search_url = f"https://www.google.com/search?q={query}&hl=zh-CN"
+            search_url = "https://www.google.com/search?" + urlencode({"q": query, "hl": "zh-CN"})
             await page.goto(search_url)
             
             # 等待搜索结果加载
@@ -61,8 +63,6 @@ class PlaywrightServer:
                 except Exception as e:
                     logger.warning(f"提取搜索结果{i+1}失败: {e}")
             
-            await page.close()
-            
             return {
                 'query': query,
                 'results': results,
@@ -76,9 +76,13 @@ class PlaywrightServer:
                 'query': query,
                 'results': []
             }
+        finally:
+            if page is not None:
+                await page.close()
     
     async def fetch_page_content(self, url: str):
         """获取网页内容"""
+        page = None
         try:
             if not self.browser:
                 await self.initialize()
@@ -100,8 +104,6 @@ class PlaywrightServer:
             ''')
             
             title = await page.title()
-            await page.close()
-            
             return {
                 'url': url,
                 'title': title,
@@ -115,6 +117,9 @@ class PlaywrightServer:
                 'error': f'页面获取失败: {str(e)}',
                 'url': url
             }
+        finally:
+            if page is not None:
+                await page.close()
     
     async def close(self):
         """关闭浏览器"""
@@ -194,18 +199,14 @@ def main():
         except Exception as e:
             print(json.dumps({"error": f"处理请求时发生错误: {str(e)}"}, ensure_ascii=False))
             sys.stdout.flush()
+        finally:
+            await playwright_server.close()
     
     # 运行异步处理
     try:
         asyncio.run(process_single_request())
     except Exception as e:
         print(json.dumps({"error": f"启动失败: {str(e)}"}, ensure_ascii=False))
-    finally:
-        # 清理资源
-        try:
-            asyncio.run(playwright_server.close())
-        except:
-            pass
 
 if __name__ == "__main__":
     main()

@@ -333,6 +333,34 @@ Please start configuring the system from the left navigation.
     }
 }
 
+TRANSLATIONS["zh"].update({
+    "readonly_notice": "仅支持只读查询；SQL 校验始终启用，请使用数据库只读账号。",
+    "result_truncated": "结果已达到返回行数上限，请勿将其视为完整数据。",
+    "analysis_plan": "分析计划",
+    "execute_plan": "执行计划",
+    "cancel_plan": "取消计划",
+    "retry_plan": "重新执行上次未完成的计划",
+    "plan_updated": "计划已更新，可继续补充、执行或取消。",
+    "plan_ready": "计划已生成，请确认后执行；也可以输入修改意见。",
+    "execution_failed": "执行失败",
+    "enable_on_demand": "启用按需调用",
+    "disable_server": "禁用调用",
+})
+TRANSLATIONS["en"].update({
+    "readonly_notice": "Read-only queries only. SQL validation is always enabled; use a read-only database account.",
+    "result_truncated": "The row limit was reached. This is not the complete dataset.",
+    "analysis_plan": "Analysis plan",
+    "execute_plan": "Execute plan",
+    "cancel_plan": "Cancel plan",
+    "retry_plan": "Rerun the last incomplete plan",
+    "plan_updated": "Plan updated. You can revise, execute, or cancel it.",
+    "plan_ready": "Plan ready. Review it before execution or enter feedback.",
+    "execution_failed": "Execution failed",
+    "enable_on_demand": "Enable on-demand calls",
+    "disable_server": "Disable calls",
+})
+
+
 def get_language():
     """Get current language from session state"""
     # Check for command line argument first

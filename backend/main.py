@@ -1,6 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import chat, database, mcp, llm
+from fastapi.responses import JSONResponse
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.routers import chat, database, mcp, llm
 
 app = FastAPI(
     title="GenBI API",
@@ -22,6 +27,16 @@ app.include_router(chat.router, prefix="/api/chat", tags=["聊天"])
 app.include_router(database.router, prefix="/api/database", tags=["数据库"])
 app.include_router(mcp.router, prefix="/api/mcp", tags=["MCP"])
 app.include_router(llm.router, prefix="/api/llm", tags=["LLM"])
+
+
+@app.exception_handler(ValueError)
+async def invalid_request(request, exc):
+    return JSONResponse(status_code=400, content={"detail": str(exc), "success": False})
+
+
+@app.exception_handler(RuntimeError)
+async def execution_failed(request, exc):
+    return JSONResponse(status_code=502, content={"detail": str(exc), "success": False})
 
 @app.get("/")
 async def root():

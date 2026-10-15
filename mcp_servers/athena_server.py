@@ -1,458 +1,165 @@
 #!/usr/bin/env python3
-"""
-AWS Athena MCP Server
-提供Athena查询功能的MCP工具服务器
-"""
-
 import json
 import sys
-import boto3
-import pandas as pd
-from typing import Dict, Any, List
 import time
+from pathlib import Path
+from typing import Any, Dict
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.sql_utils import validate_readonly_sql
+
 
 class AthenaServer:
     def __init__(self):
         self.client = None
         self.config = {}
-    
+
     def initialize(self, config: Dict[str, Any]):
-        """初始化Athena客户端"""
         self.config = config
+        options = {"region_name": config.get("region", "us-east-1")}
+        for key, legacy in (("aws_access_key_id", "access_key"),
+                            ("aws_secret_access_key", "secret_key"),
+                            ("aws_session_token", "session_token")):
+            value = config.get(key) or config.get(legacy)
+            if value:
+                options[key] = value
         self.client = boto3.client(
-            'athena',
-            region_name=config.get('region', 'us-east-1'),
-            aws_access_key_id=config.get('aws_access_key_id'),
-            aws_secret_access_key=config.get('aws_secret_access_key')
+            "athena", **options,
+            config=Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}),
         )
-    
+
     def execute_query(self, sql: str, database: str = None) -> Dict[str, Any]:
-        """执行Athena查询"""
-        if not self.client:
-            return {"error": "Athena客户端未初始化"}
-        
+        if self.client is None:
+            return {"error": "Athena client is not initialized"}
         try:
-            # 打印调试信息
-            print(f"执行查询: {sql} (数据库: {database})", file=sys.stderr)
-            
-            # 构建查询参数
-            query_params = {
-                'QueryString': sql,
-                'QueryExecutionContext': {
-                    'Database': database or 'default'
-                }
+            sql = validate_readonly_sql(sql, "athena")
+            timeout = float(self.config.get("query_timeout", 240))
+            max_rows = int(self.config.get("max_rows", 1000))
+            if timeout <= 0 or max_rows <= 0:
+                raise ValueError("query_timeout and max_rows must be positive")
+            params = {
+                "QueryString": sql,
+                "QueryExecutionContext": {
+                    "Database": database or self.config.get("database", "default"),
+                    "Catalog": self.config.get("catalog", "AwsDataCatalog"),
+                },
+                "WorkGroup": self.config.get("workgroup", "primary"),
             }
-            
-            # 只有当s3_output_location被明确设置时才添加ResultConfiguration
-            s3_output = self.config.get('s3_output_location')
-            if s3_output:
-                query_params['ResultConfiguration'] = {
-                    'OutputLocation': s3_output
-                }
-            
-            # 打印查询参数
-            print(f"查询参数: {query_params}", file=sys.stderr)
-            
-            # 启动查询
-            response = self.client.start_query_execution(**query_params)
-            
-            query_id = response['QueryExecutionId']
-            print(f"查询ID: {query_id}", file=sys.stderr)
-            
-            # 等待查询完成
+            if self.config.get("s3_output_location"):
+                params["ResultConfiguration"] = {"OutputLocation": self.config["s3_output_location"]}
+            started = time.monotonic()
+            query_id = self.client.start_query_execution(**params)["QueryExecutionId"]
             while True:
-                result = self.client.get_query_execution(QueryExecutionId=query_id)
-                status = result['QueryExecution']['Status']['State']
-                print(f"查询状态: {status}", file=sys.stderr)
-                
-                if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                status = self.client.get_query_execution(
+                    QueryExecutionId=query_id
+                )["QueryExecution"]["Status"]
+                if status["State"] == "SUCCEEDED":
                     break
-                time.sleep(1)
-            
-            if status == 'SUCCEEDED':
-                # 获取查询结果
-                results = self.client.get_query_results(QueryExecutionId=query_id)
-                
-                # 转换为DataFrame格式
-                columns = [col['Label'] for col in results['ResultSet']['ResultSetMetadata']['ColumnInfo']]
-                print(f"列名: {columns}", file=sys.stderr)
-                
-                rows = []
-                all_rows = results['ResultSet']['Rows']
-                
-                # 如果有数据行
-                if len(all_rows) > 0:
-                    # 如果第一行是标题行，则从第二行开始
-                    data_rows = all_rows[1:] if len(all_rows) > 1 else []
-                    for row in data_rows:
-                        row_data = [cell.get('VarCharValue', '') for cell in row['Data']]
-                        rows.append(row_data)
-                
-                # 应用行数限制
-                max_rows = self.config.get('max_rows', 100)
-                if len(rows) > max_rows:
-                    rows = rows[:max_rows]
-                
-                print(f"查询结果行数: {len(rows)}", file=sys.stderr)
-                
-                return {
-                    "success": True,
-                    "data": {
-                        "columns": columns,
-                        "rows": rows,
-                        "row_count": len(rows),
-                        "query_id": query_id
-                    }
-                }
-            else:
-                error_reason = result['QueryExecution']['Status'].get('StateChangeReason', '未知错误')
-                print(f"查询失败原因: {error_reason}", file=sys.stderr)
-                return {"error": f"查询失败: {error_reason}"}
-                
-        except Exception as e:
-            print(f"查询异常: {str(e)}", file=sys.stderr)
-            return {"error": f"执行查询时出错: {str(e)}"}
-    
-    def get_tables(self, database: str = 'default') -> Dict[str, Any]:
-        """获取数据库表列表"""
-        try:
-            # 如果没有客户端，返回错误
-            if not self.client:
-                return {"error": "Athena客户端未初始化"}
-            
-            # 尝试两种方式获取表列表
-            tables = []
-            
-            # 方式1: 使用SHOW TABLES命令
-            try:
-                # 构建查询参数
-                query_params = {
-                    'QueryString': f"SHOW TABLES IN {database}",
-                    'QueryExecutionContext': {
-                        'Database': database
-                    }
-                }
-                
-                # 只有当s3_output_location被明确设置时才添加ResultConfiguration
-                s3_output = self.config.get('s3_output_location')
-                if s3_output:
-                    query_params['ResultConfiguration'] = {
-                        'OutputLocation': s3_output
-                    }
-                
-                # 启动查询
-                response = self.client.start_query_execution(**query_params)
-                query_id = response['QueryExecutionId']
-                
-                # 等待查询完成
-                while True:
-                    result = self.client.get_query_execution(QueryExecutionId=query_id)
-                    status = result['QueryExecution']['Status']['State']
-                    
-                    if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                if status["State"] in ("FAILED", "CANCELLED"):
+                    return {"error": f"Athena query {status['State']}: "
+                                     f"{status.get('StateChangeReason', 'No reason provided')}"}
+                if time.monotonic() - started >= timeout:
+                    self.client.stop_query_execution(QueryExecutionId=query_id)
+                    return {"error": f"Athena query timed out after {timeout:g}s and was cancelled"}
+                time.sleep(min(1, max(0, timeout - (time.monotonic() - started))))
+
+            rows, columns, token = [], [], None
+            first_page = True
+            while True:
+                if time.monotonic() - started >= timeout:
+                    return {"error": "Athena result download timed out; no partial result returned"}
+                request = {"QueryExecutionId": query_id, "MaxResults": min(1000, max_rows + 1)}
+                if token:
+                    request["NextToken"] = token
+                page = self.client.get_query_results(**request)
+                result_set = page["ResultSet"]
+                if first_page:
+                    columns = [column["Label"] for column in result_set["ResultSetMetadata"]["ColumnInfo"]]
+                page_rows = result_set.get("Rows", [])
+                if first_page:
+                    page_rows = page_rows[1:]
+                    first_page = False
+                for row in page_rows:
+                    values = [cell.get("VarCharValue") for cell in row["Data"]]
+                    rows.append(values + [None] * (len(columns) - len(values)))
+                    if len(rows) > max_rows:
                         break
-                    time.sleep(1)
-                
-                if status == 'SUCCEEDED':
-                    # 获取查询结果
-                    results = self.client.get_query_results(QueryExecutionId=query_id)
-                    
-                    # 转换为DataFrame格式
-                    rows = []
-                    all_rows = results['ResultSet']['Rows']
-                    
-                    # 检查是否有标题行
-                    if len(all_rows) > 0:
-                        # 如果第一行是标题行，则从第二行开始
-                        data_rows = all_rows[1:] if len(all_rows) > 1 else []
-                        for row in data_rows:
-                            row_data = [cell.get('VarCharValue', '') for cell in row['Data']]
-                            rows.append(row_data)
-                    
-                    # 打印调试信息
-                    print(f"SHOW TABLES查询结果: {rows}", file=sys.stderr)
-                    
-                    # 提取表名
-                    for row in rows:
-                        if row and len(row) > 0:
-                            tables.append(row[0])
-            except Exception as e:
-                print(f"SHOW TABLES命令失败: {str(e)}", file=sys.stderr)
-            
-            # 方式2: 尝试直接查询数据库同名表
-            if not tables:
-                try:
-                    # 尝试查询数据库同名表
-                    query_params = {
-                        'QueryString': f"SELECT * FROM {database} LIMIT 1",
-                        'QueryExecutionContext': {
-                            'Database': database
-                        }
-                    }
-                    
-                    if s3_output:
-                        query_params['ResultConfiguration'] = {
-                            'OutputLocation': s3_output
-                        }
-                    
-                    response = self.client.start_query_execution(**query_params)
-                    query_id = response['QueryExecutionId']
-                    
-                    while True:
-                        result = self.client.get_query_execution(QueryExecutionId=query_id)
-                        status = result['QueryExecution']['Status']['State']
-                        
-                        if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                            break
-                        time.sleep(1)
-                    
-                    if status == 'SUCCEEDED':
-                        # 如果查询成功，说明表存在
-                        tables.append(database)
-                        print(f"数据库同名表存在: {database}", file=sys.stderr)
-                except Exception as e:
-                    print(f"查询数据库同名表失败: {str(e)}", file=sys.stderr)
-            
-            # 方式3: 尝试查询defects表
-            if not tables:
-                try:
-                    # 尝试查询defects表
-                    query_params = {
-                        'QueryString': "SELECT * FROM defects LIMIT 1",
-                        'QueryExecutionContext': {
-                            'Database': database
-                        }
-                    }
-                    
-                    if s3_output:
-                        query_params['ResultConfiguration'] = {
-                            'OutputLocation': s3_output
-                        }
-                    
-                    response = self.client.start_query_execution(**query_params)
-                    query_id = response['QueryExecutionId']
-                    
-                    while True:
-                        result = self.client.get_query_execution(QueryExecutionId=query_id)
-                        status = result['QueryExecution']['Status']['State']
-                        
-                        if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                            break
-                        time.sleep(1)
-                    
-                    if status == 'SUCCEEDED':
-                        # 如果查询成功，说明表存在
-                        tables.append('defects')
-                        print("表defects存在", file=sys.stderr)
-                except Exception as e:
-                    print(f"查询defects表失败: {str(e)}", file=sys.stderr)
-            
-            return {"success": True, "tables": tables}
-                
-        except Exception as e:
-            return {"error": f"获取表列表时出错: {str(e)}"}
-    
-    def describe_table(self, table_name: str, database: str = 'default') -> Dict[str, Any]:
-        """获取表结构"""
-        try:
-            # 如果没有客户端，返回错误
-            if not self.client:
-                return {"error": "Athena客户端未初始化"}
-            
-            print(f"尝试获取表结构: {table_name} (数据库: {database})", file=sys.stderr)
-            
-            # 方式1: 使用DESCRIBE命令
-            columns = []
-            try:
-                # 构建查询参数
-                query_params = {
-                    'QueryString': f"DESCRIBE {database}.{table_name}",
-                    'QueryExecutionContext': {
-                        'Database': database
-                    }
-                }
-                
-                # 只有当s3_output_location被明确设置时才添加ResultConfiguration
-                s3_output = self.config.get('s3_output_location')
-                if s3_output:
-                    query_params['ResultConfiguration'] = {
-                        'OutputLocation': s3_output
-                    }
-                
-                print(f"查询参数: {query_params}", file=sys.stderr)
-                
-                # 启动查询
-                response = self.client.start_query_execution(**query_params)
-                query_id = response['QueryExecutionId']
-                
-                # 等待查询完成
-                while True:
-                    result = self.client.get_query_execution(QueryExecutionId=query_id)
-                    status = result['QueryExecution']['Status']['State']
-                    print(f"查询状态: {status}", file=sys.stderr)
-                    
-                    if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                        break
-                    time.sleep(1)
-                
-                if status == 'SUCCEEDED':
-                    # 获取查询结果
-                    results = self.client.get_query_results(QueryExecutionId=query_id)
-                    
-                    # 转换为DataFrame格式
-                    rows = []
-                    all_rows = results['ResultSet']['Rows']
-                    
-                    # 检查是否有标题行
-                    if len(all_rows) > 0:
-                        # 如果第一行是标题行，则从第二行开始
-                        data_rows = all_rows[1:] if len(all_rows) > 1 else []
-                        for row in data_rows:
-                            row_data = [cell.get('VarCharValue', '') for cell in row['Data']]
-                            rows.append(row_data)
-                    
-                    print(f"查询结果行数: {len(rows)}", file=sys.stderr)
-                    
-                    for row in rows:
-                        if len(row) >= 2:
-                            columns.append({
-                                "name": row[0],
-                                "type": row[1],
-                                "comment": row[2] if len(row) > 2 else ""
-                            })
-                else:
-                    error_reason = result['QueryExecution']['Status'].get('StateChangeReason', '未知错误')
-                    print(f"查询失败原因: {error_reason}", file=sys.stderr)
-            except Exception as e:
-                print(f"DESCRIBE命令失败: {str(e)}", file=sys.stderr)
-            
-            # 方式2: 如果上面失败，尝试直接查询表并获取列信息
-            if not columns:
-                try:
-                    print("尝试直接查询表获取列信息", file=sys.stderr)
-                    
-                    # 构建查询参数
-                    query_params = {
-                        'QueryString': f"SELECT * FROM {table_name} LIMIT 1",
-                        'QueryExecutionContext': {
-                            'Database': database
-                        }
-                    }
-                    
-                    if s3_output:
-                        query_params['ResultConfiguration'] = {
-                            'OutputLocation': s3_output
-                        }
-                    
-                    # 启动查询
-                    response = self.client.start_query_execution(**query_params)
-                    query_id = response['QueryExecutionId']
-                    
-                    # 等待查询完成
-                    while True:
-                        result = self.client.get_query_execution(QueryExecutionId=query_id)
-                        status = result['QueryExecution']['Status']['State']
-                        
-                        if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                            break
-                        time.sleep(1)
-                    
-                    if status == 'SUCCEEDED':
-                        # 获取查询结果
-                        results = self.client.get_query_results(QueryExecutionId=query_id)
-                        
-                        # 从元数据中提取列信息
-                        column_info = results['ResultSet']['ResultSetMetadata']['ColumnInfo']
-                        
-                        for col in column_info:
-                            columns.append({
-                                "name": col['Label'],
-                                "type": col['Type'],
-                                "comment": ""
-                            })
-                        
-                        print(f"从查询结果中提取到 {len(columns)} 个列", file=sys.stderr)
-                except Exception as e:
-                    print(f"直接查询表失败: {str(e)}", file=sys.stderr)
-            
-            if columns:
-                return {"success": True, "columns": columns}
-            else:
-                return {"error": "无法获取表结构"}
-                
-        except Exception as e:
-            return {"error": f"获取表结构时出错: {str(e)}"}
+                token = page.get("NextToken")
+                if len(rows) > max_rows or not token:
+                    break
+            truncated = len(rows) > max_rows
+            rows = rows[:max_rows]
+            result = {
+                "success": True,
+                "data": {"columns": columns, "rows": rows, "row_count": len(rows),
+                         "query_id": query_id, "truncated": truncated,
+                         "execution_time": round(time.monotonic() - started, 3)},
+            }
+            if truncated:
+                result["warning"] = f"Result limited to {max_rows} rows"
+            return result
+        except (ValueError, KeyError, TypeError, BotoCoreError, ClientError) as exc:
+            return {"error": f"Athena query failed: {exc}"}
+
+    def get_tables(self, database: str = None) -> Dict[str, Any]:
+        database = database or self.config.get("database", "default")
+        paginator = self.client.get_paginator("list_table_metadata")
+        tables = []
+        for page in paginator.paginate(
+            CatalogName=self.config.get("catalog", "AwsDataCatalog"), DatabaseName=database
+        ):
+            tables.extend(table["Name"] for table in page["TableMetadataList"])
+        return {"success": True, "tables": tables}
+
+    def describe_table(self, table_name: str, database: str = None) -> Dict[str, Any]:
+        if not table_name:
+            raise ValueError("table_name is required")
+        result = self.client.get_table_metadata(
+            CatalogName=self.config.get("catalog", "AwsDataCatalog"),
+            DatabaseName=database or self.config.get("database", "default"), TableName=table_name,
+        )["TableMetadata"]
+        return {"success": True, "columns": [
+            {"name": column["Name"], "type": column["Type"], "comment": column.get("Comment", "")}
+            for column in result.get("Columns", []) + result.get("PartitionKeys", [])
+        ]}
+
 
 def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
-    """处理MCP请求"""
-    method = request.get("method")
-    params = request.get("params", {})
-    
+    method, params = request.get("method"), request.get("params", {})
     if method == "get_server_info":
-        # 返回服务器信息
-        return {
-            "result": {
-                "name": "athena",
-                "description": "AWS Athena数据库查询服务",
-                "capabilities": ["database_query", "sql_execution", "data_analysis"],
-                "type": "stdio",
-                "version": "1.0.0",
-                "methods": ["initialize", "execute_query", "get_tables", "describe_table"],
-                "status": "ready"
-            }
-        }
-    
-    elif method == "initialize":
-        server = AthenaServer()
-        config = params.get("config", {})
-        server.initialize(config)
-        
-        return {"success": True, "initialized": True}
-    
-    elif method == "execute_query":
-        server = AthenaServer()
-        config = params.get("config", {})
-        server.initialize(config)
-        
-        return {"result": server.execute_query(
-            params.get("sql"), 
-            params.get("database", "default")
-        )}
-    
-    elif method == "get_tables":
-        server = AthenaServer()
-        config = params.get("config", {})
-        server.initialize(config)
-        
-        return {"result": server.get_tables(params.get("database", "default"))}
-    
-    elif method == "describe_table":
-        server = AthenaServer()
-        config = params.get("config", {})
-        server.initialize(config)
-        
-        return {"result": server.describe_table(
-            params.get("table_name"),
-            params.get("database", "default")
-        )}
-    
-    else:
-        return {"error": f"未知方法: {method}"}
+        return {"result": {"name": "athena", "description": "AWS Athena query service",
+                           "capabilities": ["database_query", "sql_execution"],
+                           "type": "stdio", "version": "1.0.0",
+                           "methods": ["execute_query", "get_tables", "describe_table"],
+                           "status": "ready"}}
+    server = AthenaServer()
+    server.initialize(params.get("config", {}))
+    if method == "initialize":
+        return {"result": {"success": True, "initialized": True}}
+    if method == "execute_query":
+        return {"result": server.execute_query(params.get("sql"), params.get("database"))}
+    if method == "get_tables":
+        return {"result": server.get_tables(params.get("database"))}
+    if method == "describe_table":
+        return {"result": server.describe_table(params.get("table_name"), params.get("database"))}
+    return {"error": f"Unknown method: {method}"}
+
 
 def main():
-    """MCP服务器主循环"""
-    print("Athena MCP Server 启动中...", file=sys.stderr)
-    
     for line in sys.stdin:
         try:
-            request = json.loads(line.strip())
-            response = handle_mcp_request(request)
-            print(json.dumps(response))
-            sys.stdout.flush()
-        except json.JSONDecodeError:
-            print(json.dumps({"error": "无效的JSON请求"}))
-        except Exception as e:
-            print(json.dumps({"error": f"处理请求时出错: {str(e)}"}))
+            response = handle_mcp_request(json.loads(line))
+        except (ValueError, KeyError, TypeError, BotoCoreError, ClientError) as exc:
+            response = {"error": str(exc)}
+        except Exception as exc:
+            print(f"Athena server error: {exc}", file=sys.stderr)
+            response = {"error": f"Athena server failed: {exc}"}
+        print(json.dumps(response), flush=True)
+
 
 if __name__ == "__main__":
     main()

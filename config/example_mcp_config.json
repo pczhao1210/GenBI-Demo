@@ -4,7 +4,7 @@
       "type": "stdio",
       "command": "python",
       "args": ["mcp_servers/athena_server.py"],
-      "status": "inactive",
+      "status": "active",
       "description": "AWS Athena数据库查询服务",
       "capabilities": ["database_query", "sql_execution", "data_analysis"]
     },
@@ -12,7 +12,7 @@
       "type": "stdio", 
       "command": "python",
       "args": ["mcp_servers/mysql_server.py"],
-      "status": "inactive",
+      "status": "active",
       "description": "MySQL数据库查询服务",
       "capabilities": ["database_query", "sql_execution", "connection_pool"]
     },
@@ -20,7 +20,7 @@
       "type": "stdio",
       "command": "python", 
       "args": ["mcp_servers/playwright_server.py"],
-      "status": "inactive",
+      "status": "active",
       "description": "网页数据抓取服务",
       "capabilities": ["web_scraping", "external_data", "automation"]
     }

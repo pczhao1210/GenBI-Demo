@@ -99,6 +99,28 @@ with tab1:
                                   help="客户端私钥文件路径（可选）")
         elif ssl_mode == "系统CA证书":
             st.info("💡 **系统CA证书模式**：将使用操作系统的根证书存储来验证MySQL服务器证书，无需手动配置证书文件。")
+    else:
+        st.subheader("AWS Athena 配置")
+        current = db_config.get("athena", {})
+        athena_config = {
+            "region": st.text_input("AWS Region", value=current.get("region", "us-east-1")),
+            "database": st.text_input("数据库名", value=current.get("database", "default")),
+            "catalog": st.text_input("Catalog", value=current.get("catalog", "AwsDataCatalog")),
+            "workgroup": st.text_input("Workgroup", value=current.get("workgroup", "primary")),
+            "s3_output_location": st.text_input("S3 Output Location", value=current.get("s3_output_location", "")),
+            "aws_access_key_id": st.text_input(
+                "AWS Access Key ID", value=current.get("aws_access_key_id", current.get("access_key", "")),
+                type="password",
+            ),
+            "aws_secret_access_key": st.text_input(
+                "AWS Secret Access Key", value=current.get("aws_secret_access_key", current.get("secret_key", "")),
+                type="password",
+            ),
+            "aws_session_token": st.text_input("AWS Session Token", value=current.get("aws_session_token", ""), type="password"),
+            "max_rows": st.number_input("最大返回行数", min_value=1, max_value=10000, value=current.get("max_rows", 1000)),
+            "query_timeout": st.number_input("查询超时(秒)", min_value=1, max_value=600, value=current.get("query_timeout", 240)),
+        }
+        st.caption("凭据留空时使用 AWS 默认凭据链；S3 输出位置也可由 Workgroup 配置。")
     
     # 测试连接和保存配置
     col1, col2, col3 = st.columns(3)
@@ -128,6 +150,8 @@ with tab1:
                             "ssl_cert": ssl_cert,
                             "ssl_key": ssl_key
                         })
+                else:
+                    test_config = athena_config
                 
                 # 测试基本连接
                 start_time = time.time()
@@ -196,6 +220,8 @@ with tab1:
                         "ssl_cert": ssl_cert,
                         "ssl_key": ssl_key
                     })
+            else:
+                save_config = athena_config
             
             config_manager.save_database_config(db_type, save_config)
             st.success("✅ 配置已保存!")
@@ -217,10 +243,11 @@ with tab2:
         st.subheader("当前配置")
         config_display = {}
         for key, value in current_config.items():
-            if key == "password":
+            if key in ("password", "aws_access_key_id", "aws_secret_access_key", "aws_session_token",
+                       "access_key", "secret_key", "session_token"):
                 config_display[key] = "***" if value else ""
             else:
-                config_display[key] = value
+                config_display[key] = str(value)
         
         df_config = pd.DataFrame(list(config_display.items()), columns=["配置项", "值"])
         st.dataframe(df_config, width='stretch')
@@ -231,20 +258,23 @@ with tab2:
                 # 获取数据库统计信息
                 stats_result = mcp_client.call_mcp_server_with_config(
                     db_type,
-                    "get_database_stats", 
-                    current_config
+                    "get_database_stats" if db_type == "mysql" else "get_tables",
+                    current_config,
+                    {"database": current_config.get("database", "default")}
                 )
                 
                 if "error" not in stats_result and stats_result.get("result", {}).get("success"):
-                    stats = stats_result["result"]["stats"]
+                    stats = stats_result["result"].get("stats", {})
+                    if db_type == "athena":
+                        stats = {"table_count": len(stats_result["result"]["tables"])}
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("表数量", stats.get("table_count", 0))
                     with col2:
-                        st.metric("总记录数", f"{stats.get('total_rows', 0):,}")
+                        st.metric("总记录数", f"{stats['total_rows']:,}" if "total_rows" in stats else "—")
                     with col3:
-                        st.metric("数据库大小", f"{stats.get('size_mb', 0)} MB")
+                        st.metric("数据库大小", f"{stats['size_mb']} MB" if "size_mb" in stats else "—")
                     
                     st.success("✅ 数据库连接正常")
                 else:
@@ -267,16 +297,5 @@ with tab3:
         - 查询频率统计
         """)
         
-        # 模拟一些性能数据
-        st.subheader("模拟性能数据")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("平均查询时间", "1.2秒", "0.1秒")
-        with col2:
-            st.metric("成功率", "98.5%", "1.2%")
-        with col3:
-            st.metric("活跃连接", "3/5", "1")
-        with col4:
-            st.metric("慢查询数", "2", "-1")
     else:
         st.warning("⚠️ 请先配置数据库连接")
