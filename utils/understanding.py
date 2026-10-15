@@ -31,7 +31,7 @@ def resolve_time(value, requested_at, timezone, business_day_start=0):
             "expression": expression, "end_exclusive": True}
 
 
-def understand(question, context, requested_at, source, ontology, call_model):
+def understand(question, context, requested_at, source, ontology, call_model, available_results=None):
     prompt = (
         "Extract intent and NER slot PATCHES as JSON only. Do not answer or calculate. "
         'Shape: {"intent":"query|analysis|concept|reject","followup":false,'
@@ -44,6 +44,7 @@ def understand(question, context, requested_at, source, ontology, call_model):
         "filters and comparison baselines. For ambiguous meaning return clarification as a question. "
         f"\nCurrent question: {question}\nPrevious slots: {json.dumps(context, ensure_ascii=False)}"
         f"\nOntology: {json.dumps(ontology, ensure_ascii=False)}"
+        f"\nAvailable result references: {json.dumps(available_results or [])}"
     )
     extracted = parse_json(call_model("fast", "generate_response", prompt, request_type="query"))
     if extracted.get("intent") not in ("query", "analysis", "concept", "reject"):
@@ -67,6 +68,8 @@ def understand(question, context, requested_at, source, ontology, call_model):
                                                source.get("timezone", "UTC"), source.get("business_day_start", 0))
         slots["time"]["derived_by"] = "business_calendar_v1"
     clarification = extracted.get("clarification")
+    if extracted["followup"] and not context:
+        clarification = "No prior confirmed context; specify the entity, metric and time range"
     if clarification is not None and (not isinstance(clarification, str) or not clarification.strip()):
         raise ValueError("Clarification must be a non-empty question")
     for name in ("entities", "metrics", "dimensions"):
@@ -86,6 +89,11 @@ def understand(question, context, requested_at, source, ontology, call_model):
     references = slots.get("result_reference", {}).get("value", [])
     if isinstance(references, list) and len(references) > 1:
         clarification = "Multiple result references; specify exactly one result"
+    if available_results is not None:
+        if references and (not isinstance(references, list) or set(references) - set(available_results)):
+            raise ValueError("Unknown conversation result reference")
+        if extracted["followup"] and len(available_results) > 1 and not references:
+            clarification = "Multiple previous results; specify exactly one result reference"
     normalized = f"{question}\nConfirmed slot context: {json.dumps(slots, ensure_ascii=False)}"
     return {"intent": extracted["intent"], "slots": slots, "normalized_question": normalized,
             "clarification": clarification, "requested_at": requested_at}

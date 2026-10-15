@@ -73,6 +73,21 @@ class RunTests(unittest.TestCase):
         self.service.execute(run_id)
         self.assertEqual(self.store.get(run_id)["status"], "FAILED")
 
+    def test_optional_branch_failure_does_not_fail_required_delivery(self):
+        def execute(step, *args):
+            if step["step_id"] == 1:
+                raise RuntimeError("optional source unavailable")
+            return {"status": "success", "data": "qualified delivery"}
+        self.bi.execute_step.side_effect = execute
+        run_id = self.submit({"steps": [
+            {"step_id": 1, "step_type": "external_data", "required": False},
+            {"step_id": 2, "step_type": "sql_query", "optional_dependencies": [1], "allow_missing_inputs": True},
+        ]})
+        self.service.execute(run_id)
+        state = self.store.get(run_id)
+        self.assertEqual(state["status"], "SUCCEEDED")
+        self.assertEqual(state["steps"]["1"]["status"], "FAILED")
+
     def test_clarification_checkpoint_and_stale_response(self):
         run_id = self.submit({"steps": [
             {"step_id": 1, "step_type": "user_input", "description": "Which metric?"},
@@ -89,6 +104,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.store.get(run_id)["status"], "SUCCEEDED")
         self.assertEqual(self.bi.execute_step.call_count, 1)
         self.assertEqual(self.bi.execute_step.call_args.args[3][1]["data"], "revenue")
+        self.assertEqual(len(self.store.replay(run_id)["artifacts"]), 2)
 
     def test_cancel_does_not_start_dependants_or_claim_early_completion(self):
         entered, release = threading.Event(), threading.Event()

@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 from tests.helpers import ConfigTestCase
 from utils.bi_service import BIService
-from utils.model_router import ModelRouter
+from utils.model_router import ModelRouter, ToolBudget
 from utils.semantics import KnowledgeIndex
 from utils.understanding import resolve_time, understand
 
@@ -78,6 +78,21 @@ class SemanticTests(ConfigTestCase):
         self.assertEqual(router.records[0]["status"], "FAILED")
         with self.assertRaisesRegex(RuntimeError, "budget"):
             router.call("fast", "generate_response", "answer")
+
+    def test_default_model_and_tool_budgets_stop_at_exact_thresholds(self):
+        self.llm.generate_response.return_value = "ok"
+        router = ModelRouter(self.config, self.llm)
+        for _ in range(32):
+            router.call("fast", "generate_response", "simple")
+        with self.assertRaisesRegex(RuntimeError, "budget"):
+            router.call("fast", "generate_response", "must not execute")
+        self.assertEqual(self.llm.generate_response.call_count, 32)
+        budget, tool = ToolBudget(), Mock(return_value={})
+        for _ in range(64):
+            budget.call("database.query", tool)
+        with self.assertRaisesRegex(RuntimeError, "budget"):
+            budget.call("database.query", tool)
+        self.assertEqual(tool.call_count, 64)
 
     def test_concept_explanation_does_not_need_database(self):
         self.config.save_knowledge({"documents": [{

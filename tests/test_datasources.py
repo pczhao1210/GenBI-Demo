@@ -24,6 +24,9 @@ class DatasourceTests(ConfigTestCase):
             "tables": {"other": []}}, "config": {"database": "second_db"}})
         with self.assertRaisesRegex(ValueError, "explicit datasource_id"):
             self.config.resolve_datasource("mysql")
+        with self.assertRaises(ValueError):
+            self.config.save_database_config("mysql", {"database": "must-not-write"})
+        self.assertEqual(self.config.resolve_datasource("legacy-mysql")["config"]["database"], "mysql_test")
         service = BIService(self.config, self.mcp, self.llm)
         self.llm.generate_sql.return_value = "SELECT 1"
         self.mcp.call_mcp_server_with_config.return_value = query_response()

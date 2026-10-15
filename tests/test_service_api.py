@@ -111,6 +111,15 @@ class ServiceTests(ConfigTestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid columns or rows"):
             self.service.query("question", "mysql")
 
+    def test_sql_corrections_are_bounded_and_upgrade_without_changing_input(self):
+        self.llm.generate_sql.return_value = "SELECT updated_at FROM mysql_orders"
+        self.mcp.call_mcp_server_with_config.return_value = {"result": {"error": "SQL syntax error"}}
+        with self.assertRaisesRegex(RuntimeError, "syntax"):
+            self.service.query("exclude refunds", "mysql")
+        self.assertEqual(self.mcp.call_mcp_server_with_config.call_count, 3)
+        self.assertEqual([record["role"] for record in self.service.router.records], ["sql", "sql", "reasoning"])
+        self.assertIn("exclude refunds", self.llm.generate_sql.call_args.args[0])
+
 
 class APITests(ConfigTestCase):
     def setUp(self):

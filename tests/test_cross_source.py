@@ -1,13 +1,23 @@
 import sys
+import json
+import socket
+import subprocess
+import tempfile
+import time
 import unittest
 from copy import deepcopy
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import requests
 
 from tests.helpers import ConfigTestCase
 from utils.computation import compute
 from utils.config_manager import PROJECT_ROOT
 from utils.external_evidence import align_facts, extract_evidence, extract_structured
 from utils.standard_mcp import StandardMCPClient
+from utils.bi_service import BIService
+from utils.run_service import RunService
+from utils.run_store import RunStore
 
 
 def table(columns, rows, source="pg", **extra):
@@ -20,6 +30,11 @@ def table(columns, rows, source="pg", **extra):
 
 
 class ComputationTests(unittest.TestCase):
+    def test_empty_inputs_do_not_create_zero_measurements(self):
+        result = compute({"operation": "ratio", "inputs": [1], "numerator": "n", "denominator": "d"},
+                         {1: table(["n", "d"], [])})
+        self.assertEqual(result["data"]["rows"], [])
+
     def test_ratio_recomputes_components_instead_of_averaging_ratios(self):
         result = compute({"operation": "ratio", "inputs": [1], "numerator": "n", "denominator": "d",
                           "output": "rate"}, {1: table(["n", "d"], [["1", "2"], ["9", "90"]])})
@@ -78,6 +93,11 @@ class ComputationTests(unittest.TestCase):
             compute({"operation": "join", "inputs": [1, 2], "left_on": ["id"], "right_on": ["id"],
                      "cardinality": "one_to_one", "how": "outer", "max_unmatched_ratio": 1}, inputs)
 
+    def test_memory_budget_is_not_silently_truncated(self):
+        with self.assertRaisesRegex(ValueError, "memory budget"):
+            compute({"operation": "aggregate", "inputs": [1], "columns": ["n"]},
+                    {1: table(["n", "large"], [[1, "x" * (16 * 1024 * 1024)]])})
+
 
 class ExternalTests(unittest.TestCase):
     def test_structured_api_uses_json_pointer_not_invented_positions(self):
@@ -121,6 +141,37 @@ class ExternalTests(unittest.TestCase):
 
 
 class StandardMCPTests(ConfigTestCase):
+    def test_real_streamable_http_protocol(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen([sys.executable, str(PROJECT_ROOT / "tests/fixtures/mcp_server.py"), str(port)],
+                                       stdout=log, stderr=log)
+            try:
+                ready = False
+                for _ in range(100):
+                    if process.poll() is not None:
+                        break
+                    try:
+                        requests.get(f"http://127.0.0.1:{port}/mcp", timeout=0.2)
+                        ready = True
+                        break
+                    except requests.ConnectionError:
+                        time.sleep(0.05)
+                if not ready:
+                    log.seek(0)
+                    self.fail("MCP HTTP fixture did not start: " + log.read().decode())
+                client = StandardMCPClient({"type": "streamable_http", "url": f"http://127.0.0.1:{port}/mcp"})
+                self.assertEqual(client.call("echo", {"value": 42})["result"]["value"], 42)
+            finally:
+                process.terminate()
+                try:
+                    process.wait(5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(5)
+
     def test_real_stdio_initialize_discover_call_and_error(self):
         client = StandardMCPClient({
             "protocol": "mcp", "type": "stdio", "command": sys.executable,
@@ -132,3 +183,42 @@ class StandardMCPTests(ConfigTestCase):
         self.assertEqual(client.call("echo", {"value": 42})["result"]["value"], 42)
         with self.assertRaises(RuntimeError):
             client.call("fail", {})
+
+
+class CrossSourceRunTests(ConfigTestCase):
+    def test_full_run_binds_each_engine_and_calculates_known_ratio(self):
+        for identifier, engine in (("pg", "postgresql"), ("ms", "mssql")):
+            self.config.save_datasource({
+                "datasource_id": identifier, "name": identifier, "engine": engine,
+                "config": {"database": identifier}, "schema": {"tables": {"metrics": [
+                    {"name": "id", "type": "text"}, {"name": "value", "type": "decimal"}]}},
+            })
+        self.llm.generate_sql.return_value = "SELECT id, value FROM metrics"
+        contract = {"entity": "shop", "grain": ["shop"], "time_range": {
+            "start": "2026-10-01T00:00:00Z", "end": "2026-10-02T00:00:00Z"}, "units": {}}
+        plan = {"steps": [
+            {"step_id": 1, "step_type": "sql_query", "datasource_id": "pg", "result_contract": contract},
+            {"step_id": 2, "step_type": "sql_query", "datasource_id": "ms", "result_contract": contract},
+            {"step_id": 3, "step_type": "compute", "dependencies": [1, 2], "compute_requirements": {
+                "operation": "join", "inputs": [1, 2], "left_on": ["id"], "right_on": ["id"],
+                "cardinality": "one_to_one"}},
+            {"step_id": 4, "step_type": "compute", "dependencies": [3], "compute_requirements": {
+                "operation": "ratio", "inputs": [3], "numerator": "value_left", "denominator": "value_right"}},
+        ]}
+        store = RunStore(self.config.config_dir / "runs.sqlite3")
+        service = RunService(store, self.config, lambda **kwargs: BIService(kwargs["config_manager"], self.mcp, self.llm))
+        calls = []
+        def query(adapter, sql):
+            calls.append((adapter.source["datasource_id"], adapter.engine))
+            rows = [["a", "1"], ["b", "9"]] if adapter.engine == "postgresql" else [["a", "2"], ["b", "90"]]
+            return {"data": table(["id", "value"], rows, source=adapter.source["datasource_id"],
+                                  warnings=[])["data"]}
+        with patch("utils.datasources.DatabaseAdapter.query", query):
+            run = service.submit("ratio", database="pg", plan=plan, datasource_ids=["pg", "ms"])
+            service.execute(run["run_id"])
+        state = store.get(run["run_id"])
+        self.assertEqual(state["status"], "SUCCEEDED", state.get("error"))
+        self.assertEqual(set(calls), {("pg", "postgresql"), ("ms", "mssql")})
+        data = store.artifact(run["run_id"], state["steps"]["4"]["artifact_id"])["data"]
+        self.assertEqual(data["rows"][0][1:], ["10", "92"])
+        self.assertEqual({call["role"] for call in state["model_calls"]}, {"sql"})

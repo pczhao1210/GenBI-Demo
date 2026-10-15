@@ -1,12 +1,14 @@
+import json
 from uuid import uuid4
 
-import pandas as pd
 import streamlit as st
 
 from utils.config_manager import ConfigManager
 from utils.i18n import t
 from utils.run_service import TERMINAL, get_run_service
-from utils.test_question_helper import get_test_question_input, render_test_question_sidebar
+from utils.test_question_helper import get_test_question_input
+from utils.result_view import render_citations, render_table
+from utils.presentation import export_run
 
 st.set_page_config(page_title="Smart Chat", page_icon="💬", layout="wide")
 st.title(t("smart_chat"))
@@ -15,8 +17,15 @@ service = get_run_service()
 
 with st.sidebar:
     sources = config.load_datasources()
+    opened = st.session_state.pop("open_run_id", None)
+    if opened:
+        opened_run = service.store.get(opened)
+        st.session_state.setdefault("run_sessions", {})[opened_run["database"]] = opened_run["session_id"]
+        if opened_run["database"] in sources:
+            st.session_state["primary_source"] = opened_run["database"]
     database = st.selectbox(t("select_database"), list(sources),
-                            format_func=lambda key: f"{sources[key]['name']} ({sources[key]['engine']})")
+                            format_func=lambda key: f"{sources[key]['name']} ({sources[key]['engine']})",
+                            key="primary_source")
     if not database:
         st.info(t("configure_source_hint"))
         database = "mysql"
@@ -24,11 +33,17 @@ with st.sidebar:
                                     format_func=lambda key: sources[key]["name"])
     sessions = st.session_state.setdefault("run_sessions", {})
     session_id = sessions.setdefault(database, uuid4().hex)
+    history = service.store.history()
+    conversations = {run["session_id"]: run["question"][:40] for run in reversed(history)
+                     if run["database"] == database}
+    choices = list(dict.fromkeys([session_id, *conversations]))
+    session_id = st.selectbox(t("conversation_history"), choices,
+                              format_func=lambda key: conversations.get(key, t("new_conversation")),
+                              key=f"conversation_{database}_{sessions[database]}")
     if st.button(t("new_conversation")):
         sessions[database] = uuid4().hex
         st.rerun()
     st.caption(t("readonly_notice"))
-render_test_question_sidebar()
 
 
 def show_result(run, step_id, step):
@@ -40,13 +55,13 @@ def show_result(run, step_id, step):
     payload = service.store.artifact(run["run_id"], step["artifact_id"])
     data = payload.get("data")
     if isinstance(data, dict) and "columns" in data and "rows" in data:
-        st.dataframe(pd.DataFrame(data["rows"], columns=data["columns"]))
-        if data.get("truncated"):
-            st.warning(t("result_truncated"))
+        render_table(data, f"{run['run_id']}_{step_id}")
     elif isinstance(data, str):
         st.markdown(data)
-    elif data is not None:
-        st.json(data)
+    elif data is not None and not any(key in data for key in ("sources", "chunks", "facts")):
+        with st.expander(t("debug_details")):
+            st.json(data)
+    render_citations(payload, f"{run['run_id']}_{step_id}")
     if payload.get("sql"):
         with st.expander("SQL"):
             st.code(payload["sql"], language="sql")
@@ -79,7 +94,10 @@ def workspace():
             if run.get("plan"):
                 with st.expander(t("analysis_plan")):
                     for step in run["plan"]["steps"]:
-                        st.write(f"{step['step_id']}. {step.get('description', step['step_type'])}")
+                        with st.container(border=True):
+                            st.write(f"{step['step_id']}. {step.get('description', step['step_type'])}")
+                            st.caption(f"{step['step_type']} · {step.get('datasource_id', '')} · "
+                                       f"{t('dependencies')}: {step['dependencies']}")
                     with st.expander(t("debug_details")):
                         st.json(run["plan"])
             for key, step in run["steps"].items():
@@ -91,6 +109,10 @@ def workspace():
                     if st.button(t("execute_plan"), key=f"confirm_{run_id}"):
                         service.respond(run_id, request["request_id"], run["plan_version"], "confirm")
                         service.start(run_id)
+                        st.rerun()
+                    feedback = st.text_input(t("plan_feedback"), key=f"feedback_{run_id}")
+                    if st.button(t("revise_plan"), key=f"refine_{run_id}"):
+                        service.refine(run_id, request["request_id"], run["plan_version"], feedback)
                         st.rerun()
                 else:
                     response = st.text_input(t("additional_input"), key=f"input_{run_id}")
@@ -112,6 +134,16 @@ def workspace():
                     new = service.retry(run_id)
                     service.start(new["run_id"])
                     st.rerun()
+            if run["status"] in TERMINAL:
+                st.caption(f"{t('historical_result')} · {run['created_at']}")
+                if st.button(t("refresh_analysis"), key=f"refresh_{run_id}"):
+                    new = service.retry(run_id, refresh=True)
+                    service.start(new["run_id"])
+                    st.rerun()
+                replay = service.store.replay(run_id)
+                exported, media, extension = export_run(replay)
+                st.download_button(t("download_run"), exported, file_name=f"{run_id}.{extension}",
+                                   mime=media, key=f"export_{run_id}")
             with st.expander(t("run_events")):
                 st.json(service.store.events(run_id))
 

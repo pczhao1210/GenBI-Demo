@@ -40,6 +40,8 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw, dict):
             raise ValueError("Each analysis step must be an object")
         step = dict(raw)
+        if "required" in step and type(step["required"]) is not bool:
+            raise ValueError("Step required flag must be boolean")
         step_id = step.get("step_id")
         if type(step_id) is not int or step_id <= 0 or step_id in identifiers:
             raise ValueError("Analysis step IDs must be unique positive integers")
@@ -327,18 +329,20 @@ class BIService:
                 f"Question: {question}\nRequirements: {json.dumps(requirements, ensure_ascii=False)}\n"
                 f"Evidence by exact step ID: {json.dumps(inputs, ensure_ascii=False)}\n"
                 "Base conclusions only on the supplied evidence. Explicitly report missing data, "
-                "truncation, source uncertainty, and limits of causal inference."
+                "truncation, source uncertainty, and limits of causal inference. "
+                "Only provide publicly shareable evidence summaries and conclusions, not private reasoning."
             )
             return {"status": "success", "evidence_class": "interpretation",
                     "data": self.router.call("reasoning", "generate_response", prompt, request_type="analysis")}
         raise ValueError(f"Step requires workflow input: {step['step_type']}")
 
-    def understand(self, question, database, context, requested_at):
+    def understand(self, question, database, context, requested_at, available_results=None):
         from utils.understanding import understand
         sources = self.config.load_datasources()
         matches = [s for s in sources.values() if s["engine"] == database]
         source = sources.get(database) or (matches[0] if len(matches) == 1 else {"timezone": "UTC"})
-        return understand(question, context, requested_at, source, self.config.load_semantics(), self.router.call)
+        return understand(question, context, requested_at, source, self.config.load_semantics(), self.router.call,
+                          available_results)
 
     def explain(self, question):
         knowledge = self.config.load_knowledge()

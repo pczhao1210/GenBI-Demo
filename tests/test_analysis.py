@@ -109,3 +109,18 @@ class AnalysisRunTests(unittest.TestCase):
         self.service.execute(run_id)
         self.assertEqual(self.bi.execute_step.call_count, 3)
         self.assertEqual(self.store.get(run_id)["steps"]["1"]["attempt_count"], 3)
+
+    def test_replan_limit_stops_even_with_new_evidence_each_round(self):
+        def assess(*args):
+            plan = dag()
+            plan["steps"][0]["description"] = f"new requirement {self.bi.assess.call_count}"
+            return package(plan)
+        self.bi.assess.side_effect = assess
+        self.bi.execute_step.side_effect = lambda *args: {
+            "status": "success", "data": self.bi.execute_step.call_count}
+        run_id = self.analysis_run()
+        self.service.execute(run_id)
+        state = self.store.get(run_id)
+        self.assertEqual(state["ledger"]["replans"], 2)
+        self.assertEqual(state["ledger"]["stagnation"], 0)
+        self.assertEqual(self.bi.assess.call_count, 3)

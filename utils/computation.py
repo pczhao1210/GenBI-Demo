@@ -181,7 +181,7 @@ def _compute(requirements, results):
     df = df.loc[~null_rows].copy()
     for column in set(columns):
         df[column] = df[column].map(decimal_value)
-    groups = df.groupby(group_by, dropna=False, sort=False) if group_by else [((), df)]
+    groups = df.groupby(group_by, dropna=False, sort=False) if group_by else ([((), df)] if len(df) else [])
     records, zero_divisions = [], 0
     output_name = requirements.get("output", operation)
     if not isinstance(output_name, str) or output_name in group_by:

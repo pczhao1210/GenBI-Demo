@@ -1,9 +1,11 @@
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response as DownloadResponse
 from pydantic import BaseModel, Field
 
 from utils.run_service import get_run_service
+from utils.presentation import export_run
 
 router = APIRouter()
 
@@ -27,6 +29,12 @@ class Revision(BaseModel):
     request_id: str
     plan_version: int = Field(ge=1)
     plan: dict[str, Any]
+
+
+class Feedback(BaseModel):
+    request_id: str
+    plan_version: int = Field(ge=1)
+    feedback: str = Field(min_length=1)
 
 
 def require_run(run_id):
@@ -79,6 +87,11 @@ def revise(run_id: str, request: Revision):
     return require_run(run_id).revise(run_id, **request.model_dump())
 
 
+@router.post("/{run_id}/plan/feedback")
+def feedback(run_id: str, request: Feedback):
+    return require_run(run_id).refine(run_id, **request.model_dump())
+
+
 @router.post("/{run_id}/resume")
 def resume(run_id: str):
     service = require_run(run_id)
@@ -101,3 +114,15 @@ def artifact(run_id: str, artifact_id: str):
         return require_run(run_id).store.artifact(run_id, artifact_id)
     except KeyError as exc:
         raise HTTPException(404, "Artifact not found") from exc
+
+
+@router.get("/{run_id}/replay")
+def replay(run_id: str):
+    return require_run(run_id).store.replay(run_id)
+
+
+@router.get("/{run_id}/export")
+def export(run_id: str, format: str = "json", artifact_id: str | None = None):
+    content, media, extension = export_run(require_run(run_id).store.replay(run_id), format, artifact_id)
+    return DownloadResponse(content=content, media_type=media,
+                            headers={"Content-Disposition": f'attachment; filename="{run_id}.{extension}"'})

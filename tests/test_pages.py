@@ -77,7 +77,7 @@ class PageTests(ConfigTestCase):
         self.mcp.get_tables.return_value = ["mysql_orders"]
         app = self.page("schema_config.py")
         self.click(app, "刷新Schema")
-        app.text_input[0].set_value("edited comment").run()
+        next(field for field in app.text_input if "_desc_" in (field.key or "")).set_value("edited comment").run()
         app.run()
         self.assertEqual(app.session_state["table_fields"]["mysql_orders"][0]["comment"], "edited comment")
 
@@ -141,3 +141,23 @@ class PageTests(ConfigTestCase):
         app.button(key="stop_mysql").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(self.config.load_mcp_config()["mysql"]["status"], "inactive")
+
+    def test_home_onboarding_and_english_navigation(self):
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=15).run()
+        self.assertEqual(len(app.exception), 0, str(app.exception))
+        content = "\n".join(element.value for element in app.markdown)
+        self.assertIn("不代表真实连接测试通过", "\n".join(element.value for element in app.caption))
+        app.selectbox(key="language_selector").set_value("English").run()
+        self.assertEqual(len(app.exception), 0, str(app.exception))
+        self.assertIn("Setup wizard", [element.value for element in app.subheader])
+
+    def test_scenarios_display_explicit_sample_without_live_calls(self):
+        app = self.page("scenarios.py")
+        self.assertTrue(any("SAMPLE_REPLAY" in warning.value for warning in app.warning))
+        self.assertEqual(len(app.dataframe), 2)
+        self.bi.execute_step.assert_not_called()
+
+    def test_semantics_page_is_usable_without_database_calls(self):
+        app = self.page("semantics.py")
+        self.assertEqual(len(app.exception), 0)
+        self.mcp.call_mcp_server_with_config.assert_not_called()

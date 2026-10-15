@@ -1,0 +1,43 @@
+{
+  "scenarios": [
+    {
+      "id": "concept",
+      "title": {"zh": "先解释术语，再查询指标", "en": "Explain a term, then query"},
+      "description": {"zh": "知识解释无需数据库；取数前检查指标映射。", "en": "Concept explanations need no database; querying requires metric mappings."},
+      "prerequisites": ["llm", "knowledge"],
+      "question": {"zh": "什么是转化率？有哪些口径限制？", "en": "What is conversion rate, and what are its definition limits?"},
+      "followups": {"zh": ["查询昨天的转化率", "前天呢"], "en": ["Query yesterday's conversion rate", "What about the day before yesterday?"]}
+    },
+    {
+      "id": "evidence",
+      "title": {"zh": "检查前提与证据边界", "en": "Verify a premise and evidence limits"},
+      "description": {"zh": "先验证指标是否变化，再寻找可比证据；允许证据不足。", "en": "Verify a metric change before explaining it. Insufficient evidence is a valid outcome."},
+      "prerequisites": ["llm", "datasource", "schema", "semantics"],
+      "question": {"zh": "比较最近两个完整业务日的已定义指标，先确认是否确有变化，再分析可能的解释和证据缺口。", "en": "Compare defined metrics across the last two complete business days, verify the change, then assess explanations and evidence gaps."},
+      "followups": {"zh": ["哪些结论有直接证据？", "还缺少什么数据？"], "en": ["Which conclusions have direct evidence?", "What data is still missing?"]}
+    },
+    {
+      "id": "cross-source",
+      "title": {"zh": "跨源关联与比率重算", "en": "Cross-source join and ratio recalculation"},
+      "description": {"zh": "选择两个具有相同业务键和时间粒度的数据源，源端聚合后检查基数与覆盖。", "en": "Select two sources with aligned business keys and grain; aggregate at the source and validate cardinality and coverage."},
+      "prerequisites": ["llm", "multiple_sources", "schema", "semantics"],
+      "question": {"zh": "使用已映射的业务键关联活动数据源中的同粒度指标，检查未匹配和重复计数，再汇总分子分母重算比率。", "en": "Join same-grain metrics from the active sources using mapped business keys, validate unmatched keys and double counting, then recompute the ratio from summed components."},
+      "followups": {"zh": ["两个来源的采集时间是否一致？", "如果关联覆盖不足，结论有什么限制？"], "en": ["Were both sources collected at the same time?", "How does incomplete join coverage limit the conclusion?"]}
+    }
+  ],
+  "sample": {
+    "kind": "SAMPLE_REPLAY",
+    "captured_at": "2026-10-15T00:00:00+00:00",
+    "description": {"zh": "固定演示夹具，不是实时数据库查询。", "en": "Fixed demonstration fixture, not a live database query."},
+    "data": {
+      "columns": ["day", "numerator", "denominator"],
+      "rows": [["2026-10-12", "10", "100"], ["2026-10-13", "15", "120"], ["2026-10-14", "18", "150"]],
+      "row_count": 3,
+      "units": {"numerator": "count", "denominator": "count"},
+      "truncated": false,
+      "completeness": "COMPLETE",
+      "timezone": "UTC",
+      "collected_at": "2026-10-15T00:00:00+00:00"
+    }
+  }
+}

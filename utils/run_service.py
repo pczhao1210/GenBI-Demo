@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from copy import deepcopy
 from functools import lru_cache
 from uuid import uuid4
@@ -81,6 +81,7 @@ class RunService:
         if plan is not None:
             plan = validate_plan(plan)
         run_id = uuid4().hex
+        requested_session = session_id
         session_id = session_id or uuid4().hex
         snapshot = snapshot_config(self.config)
         state = {"run_id": run_id, "session_id": session_id, "parent_run_id": parent_run_id,
@@ -95,11 +96,15 @@ class RunService:
         state["datasource_ids"] = list(dict.fromkeys(identifiers))
         previous = next((run for run in self.store.history(session_id)
                          if run["database"] == database and run["status"] == "SUCCEEDED"
+                         and run.get("datasource_ids") == state["datasource_ids"]
+                         and run["source_version"] == state["source_version"]
                          and run.get("understanding")), None)
         state["context"] = deepcopy(previous["understanding"]["slots"]) if previous else {}
+        state["available_results"] = ([f"{previous['run_id']}:{key}" for key, step in previous["steps"].items()
+                                       if step["status"] == "SUCCEEDED"] if previous else [])
         private = {"snapshot": snapshot,
                    "submission_input": {"question": question, "database": database, "plan": plan,
-                                        "datasource_ids": state["datasource_ids"]}}
+                                        "datasource_ids": state["datasource_ids"], "session_id": requested_session}}
         state, created = self.store.create(state, private, submission_id or uuid4().hex)
         if created:
             self.store.update(run_id, lambda s: None, "submitted")
@@ -118,7 +123,7 @@ class RunService:
                    "step_id": step_id, "plan_version": self.store.get(run_id)["plan_version"]}
         def change(s):
             if s["status"] == "CANCELLING":
-                s["status"] = "CANCELLED"
+                s.update(status="CANCELLED", owner=None)
                 return
             s.update(status="WAITING_INPUT", request=request, owner=None)
         self.store.update(run_id, change, "input_requested", request)
@@ -127,8 +132,8 @@ class RunService:
         state = self.store.get(run_id)
         request = state.get("request")
         artifact = None
-        if request and request["request_kind"] != "plan_confirmation" and response.strip():
-            artifact = self.store.put_artifact(run_id, {"status": "success", "data": response})
+        if request and request["request_kind"] == "clarification" and response.strip():
+            artifact = uuid4().hex
         def change(s):
             request = s["request"]
             if (s["status"] != "WAITING_INPUT" or not request
@@ -147,7 +152,8 @@ class RunService:
                     s["steps"][str(request["step_id"])] = {"status": "SUCCEEDED", "artifact_id": artifact,
                                                            "validity": "CURRENT"}
             s.update(status="QUEUED", request=None, confirmed=True)
-        return self.store.update(run_id, change, "input_received", {"request_id": request_id})
+        return self.store.update(run_id, change, "input_received", {"request_id": request_id},
+                                 artifact=(artifact, {"status": "success", "data": response}) if artifact else None)
 
     def revise(self, run_id, plan, request_id, plan_version):
         plan = validate_plan(plan)
@@ -180,6 +186,8 @@ class RunService:
                     os.kill(owner, 0)
                 except ProcessLookupError:
                     pass
+                except PermissionError as exc:
+                    raise ValueError("Cannot verify that the execution owner has exited") from exc
                 else:
                     raise ValueError("Execution owner is still alive")
             for step in s["steps"].values():
@@ -199,14 +207,24 @@ class RunService:
                 if step["status"] == "SUCCEEDED" and step.get("validity") == "CURRENT":
                     result = self.store.artifact(run_id, step["artifact_id"])
                     reuse[key] = dict(step)
+                    reuse[key].update(attempt_id=None, reused_from=run_id)
                     payloads[key] = result
         result = self.submit(previous["question"], previous["database"], previous["session_id"],
-                             plan=previous["plan"], parent_run_id=run_id, reuse=reuse,
+                             plan=previous["plan"], parent_run_id=run_id,
                              datasource_ids=previous.get("datasource_ids"))
         for key in reuse:
             artifact = self.store.put_artifact(result["run_id"], payloads[key])
-            self.store.update(result["run_id"],
-                              lambda s, k=key, a=artifact: s["steps"][k].update(artifact_id=a))
+            reuse[key]["artifact_id"] = artifact
+        def inherit(s):
+            s["steps"] = reuse
+            for key in ("understanding", "normalized_question", "context", "available_results", "analysis_mode"):
+                if key in previous:
+                    s[key] = deepcopy(previous[key])
+            if previous.get("analysis_mode"):
+                s["ledger"] = {"goal": previous["question"], "constraints": previous.get("context", {}),
+                               "round": 0, "replans": 0, "stagnation": 0, "evidence_fingerprints": [],
+                               "progress": [], "unknown": [], "hypotheses": []}
+        self.store.update(result["run_id"], inherit, "retry_created", {"parent_run_id": run_id, "refresh": refresh})
         return self.store.get(result["run_id"])
 
     def execute(self, run_id):
@@ -233,7 +251,8 @@ class RunService:
                     question = state["question"]
                     if state.get("clarification_response"):
                         question += "\nUser clarification: " + state["clarification_response"]
-                    understanding = service.understand(question, state["database"], state["context"], state["created_at"])
+                    understanding = service.understand(question, state["database"], state["context"],
+                                                        state["created_at"], state.get("available_results", []))
                     self.store.update(run_id, lambda s: s.update(
                         understanding=understanding, normalized_question=understanding["normalized_question"],
                         phase="BIND"), "question_understood", understanding)
@@ -323,6 +342,8 @@ class RunService:
                         self._step_state(run_id, key, {"status": "BLOCKED", "error": "Required dependency failed"})
                     elif all(item.get("status") == "SUCCEEDED" for item in dependencies) and all(
                             item.get("status") in STEP_TERMINAL for item in optional):
+                        if len(futures) >= 4:
+                            continue
                         if step["step_type"] == "user_input":
                             if futures:
                                 continue
@@ -336,18 +357,27 @@ class RunService:
                                            if item["status"] == "SUCCEEDED"
                                            else {"status": "error", "message": item.get("error")})
                         attempt = uuid4().hex
-                        if self.store.get(run_id)["status"] == "CANCELLING":
+                        accepted = False
+                        def begin(s):
+                            nonlocal accepted
+                            if s["status"] != "RUNNING":
+                                return
+                            accepted = True
+                            s["steps"].setdefault(key, {}).update(
+                                status="RUNNING", attempt_id=attempt, validity="CURRENT",
+                                attempt_count=existing.get("attempt_count", 0) + 1)
+                            s["tool_calls"] = s.get("tool_calls", 0) + 1
+                        self.store.update(run_id, begin, "step_started", {"step_id": key, "attempt_id": attempt})
+                        if not accepted:
                             continue
-                        self._step_state(run_id, key, {"status": "RUNNING", "attempt_id": attempt,
-                                                       "attempt_count": existing.get("attempt_count", 0) + 1,
-                                                       "validity": "CURRENT"})
-                        self.store.update(run_id, lambda s: s.update(tool_calls=s.get("tool_calls", 0) + 1))
-                        future = pool.submit(service.execute_step, step, state.get("normalized_question", state["question"]),
+                        future = pool.submit(self._invoke, run_id, service, step,
+                                             state.get("normalized_question", state["question"]),
                                              step.get("datasource_id", state["database"]), inputs)
                         futures[future] = (key, attempt, state["plan_version"])
                 if not futures:
                     state = self.store.get(run_id)
-                    if all(s.get("status") in STEP_TERMINAL for s in state["steps"].values()):
+                    if all(state["steps"].get(str(step["step_id"]), {}).get("status") in STEP_TERMINAL
+                           for step in plan["steps"]):
                         break
                     continue
                 done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
@@ -359,6 +389,8 @@ class RunService:
                             raise RuntimeError("Tool returned an invalid or unsuccessful result")
                         artifact = self.store.put_artifact(run_id, payload)
                         result = {"status": "SUCCEEDED", "artifact_id": artifact, "validity": "CURRENT"}
+                    except CancelledError:
+                        result = {"status": "CANCELLED", "validity": "CURRENT"}
                     except Exception as exc:
                         logger.exception("Run %s step %s failed", run_id, key)
                         result = {"status": "FAILED", "error": str(exc), "validity": "CURRENT"}
@@ -379,8 +411,14 @@ class RunService:
     def _finish(self, run_id, total):
         def finish(s):
             successes = sum(item["status"] == "SUCCEEDED" for item in s["steps"].values())
+            required = [step for step in s["plan"]["steps"] if step.get("required", True)]
+            required_successes = sum(s["steps"].get(str(step["step_id"]), {}).get("status") == "SUCCEEDED"
+                                     for step in required)
+            deliverables = sum(s["steps"].get(str(step["step_id"]), {}).get("status") == "SUCCEEDED"
+                               for step in required if step["step_type"] != "user_input")
             status = ("CANCELLED" if s["status"] == "CANCELLING" else
-                      "SUCCEEDED" if successes == total else "PARTIAL" if successes else "FAILED")
+                      "SUCCEEDED" if required_successes == len(required) and successes else
+                      "PARTIAL" if deliverables else "FAILED")
             s.update(status=status, phase="RENDER", owner=None,
                      answer_sufficiency=s.get("answer_sufficiency") or ("QUALIFIED" if successes else "INSUFFICIENT"))
         self.store.update(run_id, finish, "run_finished")
@@ -398,6 +436,15 @@ class RunService:
             results = {int(key): self.store.artifact(run_id, step["artifact_id"])
                        for key, step in state["steps"].items() if step["status"] == "SUCCEEDED"}
             if not results:
+                self._finish(run_id, len(state["plan"]["steps"]))
+                return
+            model_records = service.router.records if isinstance(service, BIService) else []
+            exhausted = (time.monotonic() - started + state["active_seconds"] >= state["limits"]["active_seconds"]
+                         or len(model_records) + len(state.get("model_calls", [])) >= state["limits"]["model_calls"])
+            if exhausted:
+                self.store.update(run_id, lambda s: s.update(
+                    report="Execution budget exhausted. Available results are retained; evidence remains limited.",
+                    answer_sufficiency="INSUFFICIENT"), "budget_exhausted")
                 self._finish(run_id, len(state["plan"]["steps"]))
                 return
             ledger = deepcopy(state["ledger"])
@@ -464,6 +511,33 @@ class RunService:
     def _step_state(self, run_id, key, result):
         self.store.update(run_id, lambda s: s["steps"].setdefault(key, {}).update(result),
                           "step_state", {"step_id": key, **result})
+
+    def _invoke(self, run_id, service, step, question, database, inputs):
+        if self.store.get(run_id)["status"] in {"CANCELLING", "CANCELLED"}:
+            raise CancelledError()
+        return service.execute_step(step, question, database, inputs)
+
+    def refine(self, run_id, request_id, plan_version, feedback):
+        if not feedback.strip():
+            raise ValueError("Plan feedback cannot be empty")
+        state = self.store.get(run_id)
+        if (state["status"] != "WAITING_INPUT" or state["request"]["request_id"] != request_id
+                or state["plan_version"] != plan_version):
+            raise ValueError("Stale plan feedback")
+        snapshot = self.store.get(run_id, private=True)["snapshot"]
+        service = self.service_factory(config_manager=FrozenConfig(snapshot))
+        started = time.monotonic()
+        if isinstance(service, BIService):
+            service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
+        try:
+            plan = service.analysis_plan(state.get("normalized_question", state["question"]), state["database"],
+                                         state["plan"], feedback, state["datasource_ids"])
+            return self.revise(run_id, plan, request_id, plan_version)
+        finally:
+            records = service.router.records if isinstance(service, BIService) else []
+            self.store.update(run_id, lambda s: s.update(
+                active_seconds=s["active_seconds"] + time.monotonic() - started,
+                model_calls=s.get("model_calls", []) + records))
 
 
 @lru_cache(maxsize=1)

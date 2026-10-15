@@ -60,7 +60,7 @@ class RunStore:
             raise KeyError(run_id)
         return json.loads(row[1 if private else 0])
 
-    def update(self, run_id, change, event_type=None, payload=None):
+    def update(self, run_id, change, event_type=None, payload=None, artifact=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -68,6 +68,9 @@ class RunStore:
                 raise KeyError(run_id)
             state = json.loads(row[0])
             change(state)
+            if artifact is not None:
+                db.execute("INSERT INTO artifacts VALUES (?, ?, ?)",
+                           (run_id, artifact[0], json.dumps(artifact[1], ensure_ascii=False)))
             state["updated_at"] = utcnow()
             if event_type:
                 seq = state.get("event_seq", 0) + 1
@@ -75,6 +78,9 @@ class RunStore:
                 event = {"event_id": uuid4().hex, "seq": seq, "run_id": run_id,
                          "plan_version": state["plan_version"], "time": utcnow(),
                          "type": event_type, "payload": payload or {}}
+                for key in ("step_id", "attempt_id"):
+                    if key in (payload or {}):
+                        event[key] = payload[key]
                 db.execute("INSERT INTO events VALUES (?, ?, ?)", (run_id, seq, json.dumps(event)))
             db.execute("UPDATE runs SET state=? WHERE id=?", (json.dumps(state), run_id))
         return state
@@ -106,3 +112,12 @@ class RunStore:
             rows = db.execute("SELECT state FROM runs ORDER BY rowid DESC LIMIT 200").fetchall()
         return [state for row in rows if (state := json.loads(row[0]))
                 and (session_id is None or state["session_id"] == session_id)]
+
+    def replay(self, run_id):
+        state = self.get(run_id)
+        with self.connect() as db:
+            artifacts = db.execute("SELECT id, payload FROM artifacts WHERE run_id=?", (run_id,)).fetchall()
+            events = db.execute("SELECT event FROM events WHERE run_id=? ORDER BY seq", (run_id,)).fetchall()
+        return {"kind": "HISTORICAL_REPLAY", "snapshot": state,
+                "artifacts": {key: json.loads(value) for key, value in artifacts},
+                "events": [json.loads(row[0]) for row in events]}

@@ -28,6 +28,17 @@ def validate_methods(library, previous=None):
             if (not validation.get("reviewer") or not validation.get("fixture_ids")
                     or validation.get("passed") is not True):
                 raise ValueError("Publishing requires reviewed validation and regression fixture IDs")
+        if not isinstance(item.get("cases", []), list):
+            raise ValueError("Method cases must be a list")
+        for case in item.get("cases", []):
+            if not isinstance(case, dict) or not case.get("id") or case.get("status") not in (
+                    "draft", "validated", "published", "deprecated"):
+                raise ValueError("Cases require stable IDs and validation status")
+            if case["status"] == "published" and (
+                    not case.get("validation", {}).get("reviewer")
+                    or case.get("validation", {}).get("passed") is not True
+                    or not case.get("validation", {}).get("fixture_ids")):
+                raise ValueError("Published cases require reviewed regression validation")
         validate_plan(item["template"])
     return library
 
@@ -42,7 +53,19 @@ class MethodLibrary:
         docs = [{"id": item["id"], "title": item["title"], "text": item["description"],
                  "source": "method-library", "version": str(item["version"]), "scope": "*"} for item in suitable]
         selected = KnowledgeIndex({"documents": docs}).search(question, limit=3)
-        return [self._portable(next(item for item in suitable if item["id"] == chunk["id"])) for chunk in selected]
+        results = []
+        for chunk in selected:
+            item = next(item for item in suitable if item["id"] == chunk["id"])
+            portable = self._portable(item)
+            portable["cases"] = [
+                {key: deepcopy(case[key]) for key in ("id", "problem_structure", "required_data", "adaptation", "limitations")
+                 if key in case}
+                for case in item.get("cases", [])
+                if case.get("status") == "published" and case.get("validation", {}).get("passed") is True
+                and all(conditions.get(key) == value for key, value in case.get("preconditions", {}).items())
+            ][:3]
+            results.append(portable)
+        return results
 
     @staticmethod
     def _portable(item):
@@ -86,6 +109,8 @@ def validate_conclusion(package, results):
         raise ValueError("Invalid premise assessment")
     if not all(isinstance(package[key], list) for key in ("claims", "hypotheses", "gaps")):
         raise ValueError("Assessment claims, hypotheses and gaps must be lists")
+    if package["answer_sufficiency"] == "SUFFICIENT" and not package["claims"]:
+        raise ValueError("A sufficient answer requires evidence-bound claims")
     for claim in package["claims"]:
         if not isinstance(claim.get("text"), str) or not isinstance(claim.get("facts"), list):
             raise ValueError("Claim requires text and exact numeric fact bindings")
@@ -116,6 +141,9 @@ def validate_conclusion(package, results):
             raise ValueError("Hypothesis references unavailable evidence")
         if hypothesis["status"] in ("SUPPORTED", "REFUTED") and not refs:
             raise ValueError("Hypothesis judgment requires evidence")
+        if hypothesis["status"] in ("SUPPORTED", "REFUTED") and any(
+                results[ref].get("evidence_class") in ("interpretation", "discovery") for ref in refs):
+            raise ValueError("Hypothesis judgments require source evidence, not interpretation or discovery")
     if package["premise"] == "REFUTED" and package["next_plan"]:
         raise ValueError("Refuted premise cannot force further attribution")
     if package["next_plan"]:

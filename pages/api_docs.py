@@ -23,6 +23,8 @@ endpoints = {
         "original_chain": [], "feedback": "补充对比", "database": "mysql",
     },
     "/api/llm/chat": {"messages": [{"role": "user", "content": "Hello"}]},
+    "/api/runs": {"question": "解释当前已定义的指标", "database": "mysql",
+                  "submission_id": "replace-with-unique-client-id"},
 }
 st.subheader(t("api_endpoints"))
 for endpoint in endpoints:

@@ -47,16 +47,32 @@ class ConfigManager:
     
     def load_database_config(self) -> Dict[str, Any]:
         config = self._load_config("database_config.json")
-        return config.get("databases", {})
+        databases = config.get("databases", {})
+        sources = self._load_config("datasources.json").get("sources", {})
+        if sources:
+            for engine in ("mysql", "athena", "postgresql", "mssql"):
+                matches = [source for source in sources.values() if source["engine"] == engine]
+                if len(matches) == 1:
+                    databases[engine] = matches[0]["config"]
+                else:
+                    databases.pop(engine, None)
+        return databases
     
     def save_database_config(self, db_type: str, config: Dict[str, Any]):
+        if (self.config_dir / "datasources.json").exists() and db_type in ("mysql", "athena"):
+            matches = [source for source in self.load_datasources().values() if source["engine"] == db_type]
+            if len(matches) > 1:
+                raise ValueError(f"Select an explicit datasource_id for {db_type}")
+            source = matches[0] if matches else {
+                "datasource_id": f"legacy-{db_type}", "name": db_type, "engine": db_type,
+                "config": {}, "schema": {},
+            }
+            self.save_datasource({**source, "config": config})
+            return
         with FileLock(str(self.config_dir / "database_config.json.lock")):
             existing = self._load_config("database_config.json")
             existing.setdefault("databases", {})[db_type] = config
             self._save_config("database_config.json", existing)
-        if (self.config_dir / "datasources.json").exists() and db_type in ("mysql", "athena"):
-            source = self.resolve_datasource(db_type)
-            self.save_datasource({**source, "config": config})
     
     def load_mcp_config(self) -> Dict[str, Any]:
         config = self._load_config("mcp_config.json")
@@ -132,6 +148,8 @@ class ConfigManager:
             source["config_version"] = old.get("config_version", 0) + (old.get("config") != source["config"])
             source["schema_version"] = old.get("schema_version", 0) + (old.get("schema") != source["schema"])
             catalog["sources"][source["datasource_id"]] = source
+            if source["datasource_id"] == f"legacy-{source['engine']}":
+                catalog.setdefault("legacy_mapping", {}).setdefault(source["engine"], source["datasource_id"])
             self._save_config("datasources.json", catalog)
         return source
 

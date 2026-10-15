@@ -129,6 +129,17 @@ with col2:
                               if engine in ("mysql", "athena") else adapter.metadata(selected_table)["columns"])
                     
                     if fields:
+                        old_names = {field["name"] for field in st.session_state.table_fields.get(selected_table, [])}
+                        new_names = {field["name"] for field in fields}
+                        if old_names:
+                            st.info(f"{t('schema_diff')}: +{sorted(new_names - old_names)} / -{sorted(old_names - new_names)}")
+                        previous_fields = {field["name"]: field
+                                           for field in st.session_state.table_fields.get(selected_table, [])}
+                        for field in fields:
+                            previous = previous_fields.get(field["name"], {})
+                            for key in ("comment", "business_key"):
+                                if key in previous:
+                                    field[key] = previous[key]
                         st.session_state.table_fields[selected_table] = fields
                         st.success(f"已获取{len(fields)}个字段")
                     else:
@@ -163,10 +174,32 @@ with col2:
         if selected_table in st.session_state.table_fields:
             st.markdown(f"**{t('field_list')}:**")
             fields = st.session_state.table_fields[selected_table]
+            search_field = st.text_input(t("search_fields"), key=f"{widget_prefix}_search_{selected_table}")
+            if st.button(t("preview_data"), key=f"{widget_prefix}_preview_{selected_table}"):
+                try:
+                    from utils.result_view import render_table
+                    render_table(adapter.preview(selected_table)["data"], f"schema_{database}_{selected_table}")
+                except (ValueError, RuntimeError) as exc:
+                    st.error(str(exc))
+            with st.expander(t("batch_descriptions")):
+                import pandas as pd
+                edits = st.data_editor(pd.DataFrame([
+                    {"name": field["name"], "comment": field.get("comment", ""),
+                     "business_key": bool(field.get("business_key", False))} for field in fields]),
+                    disabled=["name"], hide_index=True, key=f"{widget_prefix}_batch_{selected_table}")
+                if st.button(t("apply_descriptions"), key=f"{widget_prefix}_apply_{selected_table}"):
+                    by_name = edits.set_index("name").to_dict("index")
+                    for field in fields:
+                        field.update(by_name[field["name"]])
+                    editor["revision"] += 1
+                    st.rerun()
             
             for i, field in enumerate(fields):
                 field_name = field.get("name", "")
                 field_type = field.get("type", "")
+                if search_field and search_field.lower() not in (
+                        field_name + " " + field.get("comment", "")).lower():
+                    continue
                 
                 with st.expander(f"{field_name} ({field_type})"):
                     # 显示原始信息

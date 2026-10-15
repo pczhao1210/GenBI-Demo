@@ -69,5 +69,5 @@ Athena 使用元数据 API 枚举表和字段，包含分区字段，不探测�
 标准适配支持 stdio（`command` / `args`）和 Streamable HTTP，执行 initialize、
 tools/list 与 tools/call，保留结构化内容并显式传播工具错误。SSE 未实现。
 能力需明确映射到工具名；多个活动提供方有歧义时拒绝调用，不自动猜选。
-离线测试使用真实本地标准 stdio fixture 验证发现、调用与错误；
-Streamable HTTP 尚未与第三方远程服务器联调。
+测试使用真实本地标准 stdio fixture 验证发现、调用与错误，并通过本地 HTTP 服务验证
+Streamable HTTP 调用；尚未与第三方远程服务器联调。

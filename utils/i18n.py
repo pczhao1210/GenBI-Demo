@@ -360,6 +360,31 @@ TRANSLATIONS["en"].update({
     "disable_server": "Disable calls",
 })
 for key, zh, en in [
+    ("search_fields", "检索字段与描述", "Search fields and descriptions"), ("preview_data", "预览有限行数据", "Preview limited rows"),
+    ("batch_descriptions", "批量编辑描述与业务键", "Batch edit descriptions and business keys"),
+    ("apply_descriptions", "应用批量编辑", "Apply batch edits"), ("schema_diff", "字段差异（新增 / 移除）", "Column differences (added / removed)"),
+    ("start_page", "开始", "Start"), ("workspace_nav", "分析工作区", "Workspace"),
+    ("configuration_nav", "配置与知识", "Configuration & knowledge"), ("developer_nav", "开发入口", "Developer"),
+    ("welcome_description", "理解业务问题，取得可复核的数据，展示结论和证据边界。", "Understand questions, obtain verifiable data, and show conclusions with evidence limits."),
+    ("setup_wizard", "配置向导", "Setup wizard"), ("configured", "已配置", "Configured"),
+    ("needs_configuration", "待配置", "Needs configuration"), ("configure_now", "前往配置", "Configure"),
+    ("configured_not_connected", "以下状态仅表示配置已保存，不代表真实连接测试通过。术语解释与样例回放可独立使用。",
+     "Readiness means saved configuration, not a verified live connection. Concept help and sample replay are independent."),
+    ("start_analysis", "开始分析", "Start analysis"), ("try_sample_replay", "体验样例回放", "Try sample replay"),
+    ("recent_runs", "最近任务", "Recent runs"), ("open_run", "查看任务", "Open run"),
+    ("demo_scenarios", "演示场景", "Demo scenarios"), ("prerequisites", "先决条件", "Prerequisites"),
+    ("missing_prerequisites", "尚缺配置", "Missing configuration"), ("use_scenario", "使用此问题", "Use question"),
+    ("sample_replay", "样例回放（非实时）", "Sample replay (not live)"),
+    ("result_view", "结果视图", "Result view"), ("table_view", "表格", "Table"), ("chart_view", "图表", "Chart"),
+    ("chart_precision", "图表使用近似数值展示；精确值、NULL 与单位请以表格和 JSON 为准。",
+     "Charts use approximate numeric values; tables and JSON retain exact values, NULLs and units."),
+    ("result_scope", "口径、时间、覆盖与计算校验", "Definitions, time, coverage and computation checks"),
+    ("download_csv", "导出表格 CSV", "Export table CSV"), ("empty_result", "查询成功，但当前条件下没有数据。", "Query succeeded with no rows matching the conditions."),
+    ("evidence_sources", "支持证据与来源", "Evidence and sources"), ("open_source", "打开来源", "Open source"),
+    ("conversation_history", "会话历史", "Conversation history"), ("dependencies", "依赖", "Dependencies"),
+    ("plan_feedback", "计划修改意见（不会作为新问题执行）", "Plan feedback (not a new question)"),
+    ("revise_plan", "修改此计划", "Revise this plan"), ("historical_result", "历史运行结果", "Historical result"),
+    ("refresh_analysis", "刷新分析（新运行）", "Refresh analysis (new run)"), ("download_run", "导出运行与证据 JSON", "Export run and evidence JSON"),
     ("active_sources", "活动数据源集合", "Active data sources"),
     ("standard_mcp_config", "标准 MCP 服务器配置", "Standard MCP server configuration"),
     ("standard_mcp_help", "按服务器名称填写 JSON：protocol=mcp，type=stdio 或 streamable_http，status=active，capabilities 为能力到工具名的映射。内置工具无需改写。",
@@ -447,17 +472,13 @@ def language_selector():
     current_lang = get_language()
     lang_options = {"中文": "zh", "English": "en"}
     
-    # Show opposite language as label
-    label = "Language" if current_lang == "zh" else "语言"
-    
-    selected = st.selectbox(
-        label,
+    def changed():
+        set_language(lang_options[st.session_state.language_selector])
+
+    st.selectbox(
+        "Language / 语言",
         options=list(lang_options.keys()),
-        index=0 if current_lang == "zh" else 1,
-        key="language_selector"
+        index=list(lang_options.values()).index(current_lang),
+        key="language_selector",
+        on_change=changed,
     )
-    
-    new_lang = lang_options[selected]
-    if new_lang != current_lang:
-        set_language(new_lang)
-        st.rerun()
