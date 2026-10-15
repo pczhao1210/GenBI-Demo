@@ -109,11 +109,29 @@ curl -X POST http://localhost:8000/api/chat/query \
 - Athena 分页读取结果，保留 NULL；达到上限返回截断标记。
 - Athena 查询达到超时会请求取消；结果下载超时不会返回假完整的部分结果。
 - 工具调用有进程超时；脚本探测成功只代表能响应，不代表数据库连接成功。
-- 聊天历史和报告保存在当前 Streamlit 会话中，浏览器会话结束后不保证保留。
+- 聊天通过持久任务服务执行；运行、事件、输入快照和结果保存在 `data/runs.sqlite3`。
+  终态重试创建关联运行，成功且配置未变的步骤可复用；刷新不复用。回放不调用外部服务。
+  中断恢复需确认原执行进程已退出；无法确认完成的在途调用可能重执行，不承诺 exactly-once。
+  取消为协作式：立即停止后续调度，在途调用结束后才进入 `CANCELLED`。
 - 当前工具是内置换行 JSON RPC 兼容层，**不是完整 MCP 2025 协议实现**，
   不支持 SSE 或任意第三方 MCP 服务器。详见[工具说明](mcp_servers/README.md)。
 - 默认只监听本机；当前没有多用户认证或租户隔离，不应直接公开到互联网。
-- 图表、收藏、跨会话历史和持续性能指标尚未实现。
+- 图表、收藏和持续性能指标尚未实现。
+
+### 持久任务 API（P0）
+
+`POST /api/runs` 接收 `question`、`database`、`session_id`（可选）、
+`submission_id`（调用方生成的幂等键）和可选的固定 `plan`。
+`GET /api/runs/{run_id}` 返回生命周期、阶段、计划版本和逐步状态；
+`GET /api/runs/{run_id}/events?after=0` 按递增游标读取最多 500 条事件。
+结果通过 `/artifacts/{artifact_id}` 读取，不在状态中重复保存大表。
+
+`POST /responses` 用 `request_id`、`plan_version`、`response` 恢复澄清或确认；
+计划确认回复为 `confirm`。`POST /plan` 在确认点显式提交新计划及匹配的请求/版本。
+`POST /cancel`、`POST /resume`、`POST /retry?refresh=false` 分别取消、恢复和创建关联重试。
+上述路径均以 `/api/runs/{run_id}` 为前缀。等待用户不计入活动时长。
+固定 DAG 支持并行分支、必要依赖阻塞，以及显式允许缺失输入的可选依赖。
+执行全失败为 `FAILED`，有可用结果且部分失败为 `PARTIAL`。
 
 ## 开发与验证
 

@@ -47,6 +47,7 @@ config/*.lock
 # Logs
 *.log
 logs/
+data/
 
 # Streamlit
 .streamlit/secrets.toml

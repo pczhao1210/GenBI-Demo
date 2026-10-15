@@ -361,6 +361,22 @@ TRANSLATIONS["en"].update({
 })
 
 
+TRANSLATIONS["zh"].update({
+    "new_conversation": "新建会话", "completed_steps": "已完成步骤",
+    "debug_details": "调试详情", "additional_input": "补充信息",
+    "submit_response": "提交回复", "resume_run": "恢复中断任务",
+    "run_events": "运行事件 / 历史回放",
+    "cooperative_cancel": "取消将停止后续调度；在途工具结束前保持取消中，不宣称已中断数据库。",
+})
+TRANSLATIONS["en"].update({
+    "new_conversation": "New conversation", "completed_steps": "Completed steps",
+    "debug_details": "Debug details", "additional_input": "Additional information",
+    "submit_response": "Submit response", "resume_run": "Resume interrupted run",
+    "run_events": "Run events / replay",
+    "cooperative_cancel": "Cancellation stops scheduling; in-flight tools must finish before cancellation is confirmed.",
+})
+
+
 def get_language():
     """Get current language from session state"""
     # Check for command line argument first

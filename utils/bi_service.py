@@ -40,12 +40,19 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         step_id = step.get("step_id")
         if type(step_id) is not int or step_id <= 0 or step_id in identifiers:
             raise ValueError("Analysis step IDs must be unique positive integers")
-        if step.get("step_type") not in ("sql_query", "external_data", "llm_analysis"):
+        if step.get("step_type") not in ("sql_query", "external_data", "llm_analysis", "user_input"):
             raise ValueError(f"Unsupported analysis step type: {step.get('step_type')}")
         dependencies = step.get("dependencies", [])
         if not isinstance(dependencies, list) or any(type(ref) is not int for ref in dependencies):
             raise ValueError("Dependencies must be integer step IDs")
         step["dependencies"] = list(dict.fromkeys(dependencies))
+        optional = step.get("optional_dependencies", [])
+        if (not isinstance(optional, list) or any(type(ref) is not int for ref in optional)
+                or set(optional) & set(dependencies)):
+            raise ValueError("Optional dependencies must be distinct integer step IDs")
+        if optional and not step.get("allow_missing_inputs"):
+            raise ValueError("Optional dependencies require allow_missing_inputs")
+        step["optional_dependencies"] = list(dict.fromkeys(optional))
         if step["step_type"] == "llm_analysis":
             requirements = dict(step.get("analysis_requirements", {}))
             refs = requirements.get("input_data", dependencies)
@@ -67,12 +74,13 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         identifiers.add(step_id)
         steps.append(step)
     for step in steps:
-        if any(ref not in identifiers for ref in step["dependencies"]):
+        if any(ref not in identifiers for ref in step["dependencies"] + step["optional_dependencies"]):
             raise ValueError("Analysis plan references an unknown step")
     ordered, completed = [], set()
     pending = steps[:]
     while pending:
-        ready = [step for step in pending if set(step["dependencies"]) <= completed]
+        ready = [step for step in pending
+                 if set(step["dependencies"] + step["optional_dependencies"]) <= completed]
         if not ready:
             raise ValueError("Analysis plan contains a dependency cycle")
         for step in sorted(ready, key=lambda item: item["step_id"]):
@@ -183,39 +191,42 @@ class BIService:
                 results[step_id] = {"status": "skipped", "message": f"Dependencies failed: {failed}"}
                 continue
             try:
-                if step["step_type"] == "sql_query":
-                    requirement = json.dumps(step.get("query_requirements", {}), ensure_ascii=False)
-                    result = self.query(f"{question}\nStep: {step.get('description', '')}\n{requirement}", database)
-                    results[step_id] = {**result, "status": "success"}
-                elif step["step_type"] == "external_data":
-                    requirements = step.get("data_requirements", {})
-                    query = requirements.get("query") or " ".join(
-                        str(value) for value in requirements.values() if value
-                    ) or step.get("description")
-                    if not query:
-                        raise ValueError("External data step requires a search query")
-                    payload = result_payload(self.mcp.call_mcp_server(
-                        "playwright", "search_web", {"query": query, "max_results": 5},
-                    ))
-                    if not payload.get("results"):
-                        raise RuntimeError("No external sources found; no synthetic data substituted")
-                    results[step_id] = {"status": "success", "data": payload}
-                else:
-                    requirements = step["analysis_requirements"]
-                    inputs = {ref: results[ref] for ref in requirements["input_data"]}
-                    prompt = (
-                        f"Question: {question}\nRequirements: {json.dumps(requirements, ensure_ascii=False)}\n"
-                        f"Evidence by exact step ID: {json.dumps(inputs, ensure_ascii=False)}\n"
-                        "Base conclusions only on the supplied evidence. Explicitly report missing data, "
-                        "truncation, source uncertainty, and limits of causal inference."
-                    )
-                    analysis = self.llm.generate_response(prompt, request_type="analysis")
-                    results[step_id] = {"status": "success", "data": analysis}
+                results[step_id] = self.execute_step(step, question, database, results)
             except (ValueError, RuntimeError) as exc:
                 results[step_id] = {"status": "error", "message": str(exc)}
         completed = all(result["status"] == "success" for result in results.values())
         return {"status": "success" if completed else "partial", "plan": plan, "steps": results,
                 "completed": completed}
+
+    def execute_step(self, step: Dict, question: str, database: str, results: Dict) -> Dict:
+        if step["step_type"] == "sql_query":
+            requirement = json.dumps(step.get("query_requirements", {}), ensure_ascii=False)
+            result = self.query(f"{question}\nStep: {step.get('description', '')}\n{requirement}", database)
+            return {**result, "status": "success"}
+        if step["step_type"] == "external_data":
+            requirements = step.get("data_requirements", {})
+            query = requirements.get("query") or " ".join(
+                str(value) for value in requirements.values() if value
+            ) or step.get("description")
+            if not query:
+                raise ValueError("External data step requires a search query")
+            payload = result_payload(self.mcp.call_mcp_server(
+                "playwright", "search_web", {"query": query, "max_results": 5},
+            ))
+            if not payload.get("results"):
+                raise RuntimeError("No external sources found; no synthetic data substituted")
+            return {"status": "success", "data": payload}
+        if step["step_type"] == "llm_analysis":
+            requirements = step["analysis_requirements"]
+            inputs = {ref: results[ref] for ref in requirements["input_data"]}
+            prompt = (
+                f"Question: {question}\nRequirements: {json.dumps(requirements, ensure_ascii=False)}\n"
+                f"Evidence by exact step ID: {json.dumps(inputs, ensure_ascii=False)}\n"
+                "Base conclusions only on the supplied evidence. Explicitly report missing data, "
+                "truncation, source uncertainty, and limits of causal inference."
+            )
+            return {"status": "success", "data": self.llm.generate_response(prompt, request_type="analysis")}
+        raise ValueError(f"Step requires workflow input: {step['step_type']}")
 
 
 def format_analysis_report(question: str, execution: Dict) -> str:

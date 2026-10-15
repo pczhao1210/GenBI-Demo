@@ -5,14 +5,25 @@ from streamlit.testing.v1 import AppTest
 from tests.helpers import ConfigTestCase, query_response
 from tests.test_service_api import plan
 from utils.config_manager import PROJECT_ROOT
+from utils.run_service import RunService
+from utils.run_store import RunStore
 
 
 class PageTests(ConfigTestCase):
     def setUp(self):
         super().setUp()
+        self.bi = Mock()
+        self.bi.identify_intent.return_value = "query"
+        self.bi.execute_step.return_value = {
+            "status": "success", "sql": "SELECT 1", "data": query_response()["result"]["data"],
+        }
+        self.runs = RunService(RunStore(self.config.config_dir / "runs.sqlite3"), self.config,
+                               lambda **kw: self.bi)
+        self.runs.start = self.runs.execute
         for target, value in (
             ("utils.config_manager.ConfigManager", self.config),
             ("utils.mcp_client.MCPClient", self.mcp),
+            ("utils.run_service.get_run_service", self.runs),
         ):
             patcher = patch(target, return_value=value)
             patcher.start()
@@ -62,35 +73,28 @@ class PageTests(ConfigTestCase):
         self.assertEqual(app.session_state["table_fields"]["mysql_orders"][0]["comment"], "edited comment")
 
     def test_chat_query_history_and_source_isolation(self):
-        service = Mock()
-        service.identify_intent.return_value = "query"
-        service.query.return_value = {"sql": "SELECT 1", "data": query_response()["result"]["data"]}
-        service.sql_prompt.return_value = "schema context"
-        with patch("utils.bi_service.BIService", return_value=service):
-            app = self.page("chat.py")
-            app.chat_input[0].set_value("show rows").run()
-            self.assertEqual(len(app.exception), 0)
-            self.assertEqual(len(app.dataframe), 1)
-            app.run()
-            self.assertEqual(len(app.dataframe), 1)
-            app.selectbox[0].set_value("athena").run()
-            self.assertEqual(len(app.dataframe), 0)
-            app.selectbox[0].set_value("mysql").run()
-            self.assertEqual(len(app.dataframe), 1)
+        app = self.page("chat.py")
+        app.chat_input[0].set_value("show rows").run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.dataframe), 1)
+        app.run()
+        self.assertEqual(len(app.dataframe), 1)
+        app.selectbox[0].set_value("athena").run()
+        self.assertEqual(len(app.dataframe), 0)
+        app.selectbox[0].set_value("mysql").run()
+        self.assertEqual(len(app.dataframe), 1)
 
     def test_chat_cancel_and_clear_remove_pending_plan(self):
-        service = Mock()
-        service.identify_intent.return_value = "analysis"
-        service.analysis_plan.return_value = plan()
-        with patch("utils.bi_service.BIService", return_value=service):
-            app = self.page("chat.py")
-            app.chat_input[0].set_value("why").run()
-            self.click(app, "取消计划")
-            self.assertFalse(any(button.label == "执行计划" for button in app.button))
-            app.chat_input[0].set_value("why again").run()
-            self.click(app, "清除历史")
-            self.assertFalse(any(button.label == "执行计划" for button in app.button))
-            self.assertEqual(len(app.chat_message), 0)
+        self.bi.identify_intent.return_value = "analysis"
+        self.bi.analysis_plan.return_value = plan()
+        app = self.page("chat.py")
+        app.chat_input[0].set_value("why").run()
+        self.click(app, "取消计划")
+        self.assertFalse(any(button.label == "执行计划" for button in app.button))
+        app.chat_input[0].set_value("why again").run()
+        self.click(app, "清除历史")
+        self.assertFalse(any(button.label == "执行计划" for button in app.button))
+        self.assertEqual(len(app.chat_message), 0)
 
     def test_llm_page_imports_and_supports_sdk_provider(self):
         app = self.page("llm_config.py")
@@ -98,27 +102,22 @@ class PageTests(ConfigTestCase):
         self.assertEqual(len(app.exception), 0)
 
     def test_analysis_report_survives_rerun(self):
-        service = Mock()
-        service.identify_intent.return_value = "analysis"
-        service.analysis_plan.return_value = plan()
-        service.execute_plan.return_value = {
-            "plan": plan(), "status": "partial", "completed": False,
-            "steps": {
-                1: {"status": "error", "message": "offline"},
-                2: {"status": "success", "data": {"columns": ["n"], "rows": [[2]]}},
-                3: {"status": "success", "data": "persistent analysis"},
-            },
-        }
-        with patch("utils.bi_service.BIService", return_value=service):
-            app = self.page("chat.py")
-            app.chat_input[0].set_value("why").run()
-            self.click(app, "执行计划")
-            app.run()
-            content = "\n".join(element.value for element in app.markdown)
-            self.assertIn("persistent analysis", content)
-            self.assertIn("offline", content)
-            self.assertIn("partial (2/3)", content)
-            service.execute_plan.assert_called_once()
+        self.bi.identify_intent.return_value = "analysis"
+        self.bi.analysis_plan.return_value = plan()
+        def execute(step, *args):
+            if step["step_id"] == 1:
+                raise RuntimeError("offline")
+            return {"status": "success", "data": "persistent analysis"}
+        self.bi.execute_step.side_effect = execute
+        app = self.page("chat.py")
+        app.chat_input[0].set_value("why").run()
+        self.click(app, "执行计划")
+        app.run()
+        content = "\n".join(element.value for element in app.markdown)
+        self.assertIn("persistent analysis", content)
+        self.assertIn("offline", "\n".join(element.value for element in app.error))
+        self.assertIn("PARTIAL", content)
+        self.assertEqual(self.bi.execute_step.call_count, 3)
 
     def test_api_documentation_calls_prefixed_route(self):
         response = Mock(ok=True)

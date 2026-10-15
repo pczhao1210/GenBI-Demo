@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.routers import chat, database, mcp, llm
+from backend.routers import chat, database, mcp, llm, runs
 
 app = FastAPI(
     title="GenBI API",
@@ -27,6 +27,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["聊天"])
 app.include_router(database.router, prefix="/api/database", tags=["数据库"])
 app.include_router(mcp.router, prefix="/api/mcp", tags=["MCP"])
 app.include_router(llm.router, prefix="/api/llm", tags=["LLM"])
+app.include_router(runs.router, prefix="/api/runs", tags=["Runs"])
 
 
 @app.exception_handler(ValueError)
