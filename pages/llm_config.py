@@ -231,3 +231,15 @@ with col2:
         
         config_manager.save_llm_config(new_config)
         st.success(t('config_saved'))
+
+with st.expander(t("model_roles_title")):
+    st.caption(t("model_roles_help"))
+    roles_text = st.text_area(t("model_roles_json"),
+                              json.dumps(config_manager.load_model_roles(), ensure_ascii=False, indent=2))
+    if st.button(t("save_model_roles")):
+        try:
+            config_manager.save_model_roles(json.loads(roles_text))
+            st.success(t("config_saved"))
+        except ValueError as exc:
+            st.error(str(exc))
+import json

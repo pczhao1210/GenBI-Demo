@@ -14,6 +14,10 @@ class PageTests(ConfigTestCase):
         super().setUp()
         self.bi = Mock()
         self.bi.identify_intent.return_value = "query"
+        self.bi.understand.side_effect = lambda question, *args: {
+            "intent": self.bi.identify_intent.return_value, "slots": {},
+            "normalized_question": question, "clarification": None,
+        }
         self.bi.execute_step.return_value = {
             "status": "success", "sql": "SELECT 1", "data": query_response()["result"]["data"],
         }

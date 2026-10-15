@@ -25,7 +25,9 @@ def fingerprint(value):
 def snapshot_config(config):
     sources = config.load_datasources()
     return {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
-            "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources}
+            "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources,
+            "semantics": config.load_semantics(), "knowledge": config.load_knowledge(),
+            "model_roles": config.load_model_roles()}
 
 
 class FrozenConfig:
@@ -50,6 +52,15 @@ class FrozenConfig:
     def resolve_datasource(self, identifier):
         from utils.datasources import resolve_source
         return resolve_source(self.load_datasources(), identifier)
+
+    def load_semantics(self):
+        return deepcopy(self.snapshot["semantics"])
+
+    def load_knowledge(self):
+        return deepcopy(self.snapshot["knowledge"])
+
+    def load_model_roles(self):
+        return deepcopy(self.snapshot["model_roles"])
 
 
 class RunService:
@@ -76,6 +87,10 @@ class RunService:
                  "answer_sufficiency": None, "event_seq": 0, "active_seconds": 0,
                  "limits": {"max_steps": 30, "active_seconds": 300},
                  "source_version": fingerprint(snapshot), "cancel_capability": "cooperative"}
+        previous = next((run for run in self.store.history(session_id)
+                         if run["database"] == database and run["status"] == "SUCCEEDED"
+                         and run.get("understanding")), None)
+        state["context"] = deepcopy(previous["understanding"]["slots"]) if previous else {}
         private = {"snapshot": snapshot,
                    "submission_input": {"question": question, "database": database, "plan": plan}}
         state, created = self.store.create(state, private, submission_id or uuid4().hex)
@@ -118,8 +133,12 @@ class RunService:
             else:
                 if not response.strip():
                     raise ValueError("Clarification response cannot be empty")
-                s["steps"][str(request["step_id"])] = {"status": "SUCCEEDED", "artifact_id": artifact,
-                                                       "validity": "CURRENT"}
+                if request["request_kind"] == "understanding":
+                    s["clarification_response"] = response
+                    s.pop("understanding", None)
+                else:
+                    s["steps"][str(request["step_id"])] = {"status": "SUCCEEDED", "artifact_id": artifact,
+                                                           "validity": "CURRENT"}
             s.update(status="QUEUED", request=None, confirmed=True)
         return self.store.update(run_id, change, "input_received", {"request_id": request_id})
 
@@ -198,11 +217,32 @@ class RunService:
             snapshot = self.store.get(run_id, private=True)["snapshot"]
             service = self.service_factory(config_manager=FrozenConfig(snapshot))
             if state["plan"] is None:
-                intent = service.identify_intent(state["question"])
+                understanding = state.get("understanding")
+                if understanding is None:
+                    question = state["question"]
+                    if state.get("clarification_response"):
+                        question += "\nUser clarification: " + state["clarification_response"]
+                    understanding = service.understand(question, state["database"], state["context"], state["created_at"])
+                    self.store.update(run_id, lambda s: s.update(
+                        understanding=understanding, normalized_question=understanding["normalized_question"],
+                        phase="BIND"), "question_understood", understanding)
+                if understanding.get("clarification"):
+                    self._waiting(run_id, "understanding", understanding["clarification"])
+                    return
+                intent = understanding["intent"]
                 if intent == "reject":
                     raise ValueError("Only read-only analysis is supported")
+                if intent == "concept":
+                    result = service.explain(state["question"])
+                    artifact = self.store.put_artifact(run_id, result)
+                    self.store.update(run_id, lambda s: s.update(
+                        status="SUCCEEDED", phase="RENDER", owner=None,
+                        answer_sufficiency=result["answer_sufficiency"],
+                        steps={"knowledge": {"status": "SUCCEEDED", "artifact_id": artifact, "validity": "CURRENT"}}),
+                        "knowledge_answered")
+                    return
                 if intent == "analysis":
-                    plan = service.analysis_plan(state["question"], state["database"])
+                    plan = service.analysis_plan(understanding["normalized_question"], state["database"])
                     self.store.update(run_id, lambda s: s.update(plan=plan, phase="PLAN"), "plan_created")
                     self._waiting(run_id, "plan_confirmation", "Confirm the proposed analysis plan")
                     return
@@ -216,8 +256,12 @@ class RunService:
                 status="CANCELLED" if s["status"] == "CANCELLING" else "FAILED",
                 error=str(exc), owner=None), "run_failed", {"error": str(exc)})
         finally:
+            records = getattr(service.router, "records", []) if "service" in locals() else []
+            if not isinstance(records, list):
+                records = []
             self.store.update(run_id, lambda s: s.update(
-                active_seconds=s["active_seconds"] + time.monotonic() - started))
+                active_seconds=s["active_seconds"] + time.monotonic() - started,
+                model_calls=s.get("model_calls", []) + records))
 
     def _dag(self, run_id, service, started):
         self.store.update(run_id, lambda s: s.update(phase="EXECUTE"), "phase_changed",
@@ -262,7 +306,7 @@ class RunService:
                         attempt = uuid4().hex
                         self._step_state(run_id, key, {"status": "RUNNING", "attempt_id": attempt,
                                                        "validity": "CURRENT"})
-                        future = pool.submit(service.execute_step, step, state["question"],
+                        future = pool.submit(service.execute_step, step, state.get("normalized_question", state["question"]),
                                              step.get("datasource_id", state["database"]), inputs)
                         futures[future] = (key, attempt, state["plan_version"])
                 if not futures:

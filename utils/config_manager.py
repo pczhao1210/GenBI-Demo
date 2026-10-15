@@ -134,3 +134,30 @@ class ConfigManager:
             catalog["sources"][source["datasource_id"]] = source
             self._save_config("datasources.json", catalog)
         return source
+
+    def load_semantics(self):
+        return self._load_config("semantics.json")
+
+    def save_semantics(self, semantics):
+        from utils.semantics import validate_ontology
+        validate_ontology(semantics, self.load_datasources())
+        self._save_config("semantics.json", semantics)
+
+    def load_knowledge(self):
+        return self._load_config("knowledge.json")
+
+    def save_knowledge(self, knowledge):
+        from utils.semantics import validate_knowledge
+        validate_knowledge(knowledge)
+        self._save_config("knowledge.json", knowledge)
+
+    def load_model_roles(self):
+        return self._load_config("model_roles.json")
+
+    def save_model_roles(self, roles):
+        if not isinstance(roles, dict) or set(roles) - {"fast", "sql", "reasoning"}:
+            raise ValueError("Model roles must be fast, sql or reasoning")
+        for config in roles.values():
+            if not isinstance(config, dict) or not config.get("provider"):
+                raise ValueError("Each role requires a complete LLM provider configuration")
+        self._save_config("model_roles.json", roles)

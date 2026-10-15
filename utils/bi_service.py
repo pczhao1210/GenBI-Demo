@@ -7,6 +7,8 @@ from utils.llm_client import LLMClient
 from utils.mcp_client import MCPClient, normalize_response
 from utils.sql_utils import clean_sql_response, validate_readonly_sql
 from utils.datasources import DatabaseAdapter
+from utils.model_router import ModelRouter
+from utils.semantics import KnowledgeIndex
 
 
 def result_payload(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,6 +98,7 @@ class BIService:
         self.config = config_manager or ConfigManager()
         self.mcp = mcp_client or MCPClient(self.config)
         self._llm = llm_client
+        self.router = ModelRouter(self.config, llm_client)
 
     @property
     def llm(self):
@@ -120,11 +123,17 @@ class BIService:
 
     def sql_prompt(self, question: str, database: str) -> str:
         schema = self.schema(database)
-        engine = self.config.resolve_datasource(database)["engine"]
-        return build_schema_prompt(question, schema["tables"], schema.get("descriptions", {}), engine)
+        source = self.config.resolve_datasource(database)
+        prompt = build_schema_prompt(question, schema["tables"], schema.get("descriptions", {}), source["engine"])
+        bindings = {identifier: definition for identifier, definition in self.config.load_semantics().get("metrics", {}).items()
+                    if identifier in question and source["datasource_id"] in definition["mappings"]}
+        if bindings:
+            prompt += "\nUse these exact metric definitions, filters and source mappings:\n" + json.dumps(
+                bindings, ensure_ascii=False)
+        return prompt
 
     def generate_sql(self, question: str, database: str) -> str:
-        response = self.llm.generate_sql(self.sql_prompt(question, database), request_type="query")
+        response = self.router.call("sql", "generate_sql", self.sql_prompt(question, database), request_type="query")
         return validate_readonly_sql(clean_sql_response(response), self.config.resolve_datasource(database)["engine"])
 
     def query(self, question: str, database: str) -> Dict[str, Any]:
@@ -144,7 +153,7 @@ class BIService:
                 "sql": sql, "status": "success", **result}
 
     def identify_intent(self, question: str) -> str:
-        response = self.llm.generate_response(
+        response = self.router.call("fast", "generate_response",
             "Classify the user request. Reply only query (retrieval, statistics, comparisons), "
             "analysis (explain causes or give recommendations), or reject (modify database data). "
             f"\nUser request: {question}", request_type="query",
@@ -168,7 +177,7 @@ class BIService:
         )
         if previous_plan is not None:
             prompt += f"\nPrevious plan: {json.dumps(previous_plan, ensure_ascii=False)}\nFeedback: {feedback}"
-        response = self.llm.generate_response(prompt, request_type="analysis")
+        response = self.router.call("reasoning", "generate_response", prompt, request_type="analysis")
         block = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL | re.IGNORECASE)
         try:
             plan = json.loads(block.group(1) if block else response)
@@ -222,8 +231,34 @@ class BIService:
                 "Base conclusions only on the supplied evidence. Explicitly report missing data, "
                 "truncation, source uncertainty, and limits of causal inference."
             )
-            return {"status": "success", "data": self.llm.generate_response(prompt, request_type="analysis")}
+            return {"status": "success", "data": self.router.call("reasoning", "generate_response", prompt,
+                                                                 request_type="analysis")}
         raise ValueError(f"Step requires workflow input: {step['step_type']}")
+
+    def understand(self, question, database, context, requested_at):
+        from utils.understanding import understand
+        sources = self.config.load_datasources()
+        matches = [s for s in sources.values() if s["engine"] == database]
+        source = sources.get(database) or (matches[0] if len(matches) == 1 else {"timezone": "UTC"})
+        return understand(question, context, requested_at, source, self.config.load_semantics(), self.router.call)
+
+    def explain(self, question):
+        knowledge = self.config.load_knowledge()
+        docs = list(knowledge.get("documents", []))
+        for kind in ("entities", "metrics", "dimensions"):
+            for identifier, definition in self.config.load_semantics().get(kind, {}).items():
+                docs.append({"id": f"ontology-{identifier}", "title": identifier,
+                             "text": json.dumps(definition, ensure_ascii=False), "source": "ontology",
+                             "version": str(self.config.load_semantics().get("version", 1)), "scope": "*"})
+        chunks = KnowledgeIndex({"documents": docs}).search(question)
+        if not chunks:
+            return {"status": "success", "data": "No relevant knowledge sources found.",
+                    "answer_sufficiency": "INSUFFICIENT", "citations": []}
+        prompt = ("Explain using only the following knowledge excerpts. Cite exact chunk IDs in brackets. "
+                  "State any limits or conflicts. Do not claim database computability."
+                  f"\nQuestion: {question}\n{json.dumps(chunks, ensure_ascii=False)}")
+        text = self.router.call("fast", "generate_response", prompt, request_type="query")
+        return {"status": "success", "data": text, "citations": chunks, "answer_sufficiency": "QUALIFIED"}
 
 
 def format_analysis_report(question: str, execution: Dict) -> str:

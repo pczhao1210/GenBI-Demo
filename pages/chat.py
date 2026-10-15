@@ -58,6 +58,12 @@ def workspace():
             st.markdown(run["question"])
         with st.chat_message("assistant"):
             st.write(f"{run['status']} · {run['phase']} · v{run['plan_version']}")
+            if run.get("understanding"):
+                with st.expander(t("understood_question")):
+                    st.write(run["understanding"]["normalized_question"])
+                    st.json(run["understanding"]["slots"])
+            if run.get("answer_sufficiency"):
+                st.caption(f"{t('answer_sufficiency')}: {run['answer_sufficiency']}")
             completed = sum(s["status"] == "SUCCEEDED" for s in run["steps"].values())
             total = len((run.get("plan") or {}).get("steps", []))
             st.caption(f"{t('completed_steps')}: {completed}/{total}")

@@ -43,6 +43,9 @@ config/schema_config.json
 config/mcp_config.json
 config/*.lock
 config/datasources.json
+config/semantics.json
+config/knowledge.json
+config/model_roles.json
 !config/example_*.json
 
 # Logs
