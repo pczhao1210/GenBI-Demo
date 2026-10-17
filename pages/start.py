@@ -25,7 +25,7 @@ for number, (label, ready, path) in enumerate(steps, 1):
 left, right = st.columns(2)
 left.page_link("pages/chat.py", label=t("start_analysis"), icon="💬")
 right.page_link("pages/scenarios.py", label=t("try_sample_replay"), icon="🎬")
-history = get_run_service().store.history()
+history = get_run_service().store.history_page(limit=5)["items"]
 if history:
     st.subheader(t("recent_runs"))
     for run in history[:5]:

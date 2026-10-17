@@ -36,12 +36,20 @@ class ExecutePlanRequest(QueryRequest):
 
 @router.post("/query")
 def query_data(request: QueryRequest):
-    return BIService().query(request.question, request.source)
+    service = BIService()
+    try:
+        return service.query(request.question, request.source)
+    finally:
+        service.close()
 
 
 @router.post("/analyze")
 def analyze_data(request: QueryRequest):
-    plan = BIService().analysis_plan(request.question, request.source)
+    service = BIService()
+    try:
+        plan = service.analysis_plan(request.question, request.source)
+    finally:
+        service.close()
     return {"intent": "analysis", "analysis_chain": plan["steps"], "plan": plan, "status": "pending"}
 
 
@@ -52,10 +60,14 @@ def execute_plan(request: ExecutePlanRequest):
 
 @router.post("/optimize-chain")
 def optimize_chain(request: OptimizeChainRequest):
-    plan = BIService().analysis_plan(
-        request.question, request.database,
-        previous_plan={"steps": request.original_chain}, feedback=request.feedback,
-    )
+    service = BIService()
+    try:
+        plan = service.analysis_plan(
+            request.question, request.database,
+            previous_plan={"steps": request.original_chain}, feedback=request.feedback,
+        )
+    finally:
+        service.close()
     return {"optimized_chain": plan["steps"], "plan": plan, "status": "optimized"}
 
 

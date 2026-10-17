@@ -218,9 +218,25 @@ def _compute(requirements, results):
     result = pd.DataFrame(records, columns=list(dict.fromkeys(names)), dtype=object)
     meta = {key: value for key, value in metadata.items()
             if key not in ("columns", "rows", "diagnostics", "logical_types", "repeated_measures")}
+    units = metadata.get("units", {})
+    meta["units"] = {column: unit for column, unit in units.items()
+                     if column in (group_by + columns if operation == "aggregate" else group_by)}
+    warnings = ["Zero denominator produces NULL."] if zero_divisions else []
+    if operation == "difference":
+        meta["units"][output_name] = units[columns[0]]
+    elif operation == "ratio":
+        for column, suffix in zip(columns, ("numerator", "denominator")):
+            if units.get(column):
+                meta["units"][f"{output_name}_{suffix}"] = units[column]
+        numerator_unit, denominator_unit = (units.get(column) for column in columns)
+        if numerator_unit and denominator_unit:
+            meta["units"][output_name] = ("ratio" if numerator_unit == denominator_unit
+                                          else f"({numerator_unit})/({denominator_unit})")
+        else:
+            warnings.append("Ratio output unit is unknown because operand units are missing.")
     meta["decimal_precision"] = 50
     meta["repeated_measures"] = [column for column in metadata.get("repeated_measures", [])
                                  if column in result.columns]
     return output(result, meta, {"operation": operation, "input_rows": len(metadata["rows"]),
                                 "excluded_null_rows": int(null_rows.sum()), "zero_denominators": int(zero_divisions),
-                                "warnings": ["Zero denominator produces NULL."] if zero_divisions else []})
+                                "warnings": warnings})

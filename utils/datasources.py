@@ -64,11 +64,12 @@ def serialize_cell(value):
 
 
 class DatabaseAdapter:
-    def __init__(self, source, mcp=None):
+    def __init__(self, source, mcp=None, call_timeout=None):
         self.source = source
         self.engine = normalize_engine(source["engine"])
         self.config = source["config"]
         self.mcp = mcp
+        self.call_timeout = call_timeout
 
     def capabilities(self):
         return {"engine": self.engine, "dialect": {"athena": "presto", "postgresql": "postgres",
@@ -119,8 +120,9 @@ class DatabaseAdapter:
         if self.mcp is None:
             from utils.mcp_client import MCPClient
             self.mcp = MCPClient()
+        options = {"timeout": self.call_timeout} if self.call_timeout is not None else {}
         return result_payload(self.mcp.call_mcp_server_with_config(
-            self.engine, method, self.config, params or {}))
+            self.engine, method, self.config, params or {}, **options))
 
     def metadata(self, table=None):
         if self.engine in ("mysql", "athena"):

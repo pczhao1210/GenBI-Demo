@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -51,6 +52,28 @@ def fetch_document(url):
         body = "\n".join(parser.parts)
     return {"url": final_url, "text": body, "content_type": content_type, "collected_at": utcnow(),
             "published_at": None, "complete": True, "position_kind": "extracted_text_character"}
+
+
+def mcp_document(payload, url, known_fetch=False, *, start_index=0):
+    if urlparse(url).scheme not in ("http", "https"):
+        raise ValueError("MCP Fetch requires an HTTP(S) URL")
+    if type(start_index) is not int or start_index < 0:
+        raise ValueError("MCP Fetch start_index must be a non-negative integer")
+    content = payload.get("content", [])
+    text = payload.get("text")
+    if text is None:
+        text = content if isinstance(content, str) else "\n".join(
+            item["text"] for item in content if item.get("type") == "text")
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("MCP Fetch returned no document text")
+    if len(text.encode()) > 2 * 1024 * 1024:
+        raise RuntimeError("MCP document exceeds the 2 MiB budget")
+    truncated = bool(re.search(r"content truncated|start_index|<error>", text, re.IGNORECASE))
+    complete = known_fetch and start_index == 0 and not truncated
+    return {"url": url, "text": text, "content_type": "text/plain", "collected_at": utcnow(),
+            "published_at": None, "complete": complete, "position_kind": "extracted_text_character",
+            "start_index": start_index,
+            "warnings": [] if complete else ["MCP document is partial or completeness is unknown."]}
 
 
 def align_facts(facts, need, document):

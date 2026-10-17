@@ -57,8 +57,8 @@ class ToolBudget:
         self.records = []
         self._lock = threading.Lock()
 
-    def call(self, capability, function, *args, **kwargs):
-        record = {"capability": capability, "status": "RUNNING"}
+    def call(self, capability, function, *args, _tool_metadata=None, **kwargs):
+        record = {"capability": capability, "status": "RUNNING", **(_tool_metadata or {})}
         with self._lock:
             if len(self.records) >= self.max_calls:
                 raise RuntimeError("Tool call budget exhausted")

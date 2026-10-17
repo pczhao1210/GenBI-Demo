@@ -95,7 +95,7 @@ LLM、数据库或工具执行失败返回 502，不返回成功形状的模拟�
 | GET | `/api/llm/models?provider=openai` | 从提供商获取模型列表 |
 | POST | `/api/llm/chat` | 保留完整消息历史的 LLM 对话 |
 | POST | `/api/mcp/execute` | 执行内置注册工具 |
-| GET | `/api/mcp/status` | 检查配置启用状态及脚本响应能力 |
+| GET | `/api/mcp/status` | 读取启用状态与已有探测快照，不自动启动服务器 |
 
 ```bash
 curl -X POST http://localhost:8000/api/chat/query \
@@ -106,6 +106,8 @@ curl -X POST http://localhost:8000/api/chat/query \
 计划中 `dependencies` 和 `analysis_requirements.input_data` 使用整数步骤 ID。
 执行器按依赖顺序运行，依赖失败时返回 `skipped`。部分失败的计划返回
 `status: "partial"`、`completed: false`，而不是把整个计划标记为成功。
+同步兼容响应另有 `execution_status`，使用与持久任务一致的 `SUCCEEDED` / `PARTIAL` /
+`FAILED` / `CANCELLED`；旧 `partial` / `skipped` 名称只在兼容边界映射。
 
 ## 结果与运行边界
 
@@ -184,7 +186,7 @@ PostgreSQL/MSSQL 服务验收连接、元数据与查询，也未在本机安装
 
 “业务语义与知识”页维护结构化 Ontology 和 UTF-8 知识文档。指标需明确公式、聚合、
 时间字段、单位、允许维度和数据源映射；保存时校验表字段与 ID，未映射指标只可解释。
-轻量检索使用持久化文档和启动时构建的中英词项索引，返回片段位置、来源、版本与适用范围；
+轻量检索使用持久化文档和按内容快照缓存的中英词项索引，返回片段位置、来源、版本与适用范围；
 不要求向量服务。术语解释无需连接数据库。
 
 任务先由快速模型输出 NER 槽位补丁，代码校验原文位置、实体 ID、维度兼容性与时间区间。
@@ -207,7 +209,7 @@ PostgreSQL/MSSQL 服务验收连接、元数据与查询，也未在本机安装
 强模型重新绑定，不传递历史 SQL、源 ID 或结论。无适用方法时仍可通用规划。
 
 复杂任务确认后执行“DAG → 证据评估 → 必要重规划”，持久化目标、假设、缺口、
-新证据与停滞计数。默认最多 30 步、64 次步骤调用、32 次模型调用、300 秒活动时长、
+新证据与停滞计数。默认最多 30 步、64 次实际工具尝试、32 次模型调用、300 秒活动时长、
 2 次重规划或连续 2 轮无新增证据；暂时性超时/连接错误最多重试 2 次。
 SQL 字段/语法错误最多修正 2 次，第二次升级 reasoning；合法空结果不当作语法错误重试。
 输入或步骤变化时仅失效受影响后代，仍有效分支不重取数。
@@ -248,7 +250,91 @@ value/unit/region/observed_at/variable 字段，保留 JSON Pointer。时间、�
 实际模型/工具调用均计入独立预算，外部抓取有超时和 2 MiB 文档预算。
 
 本地标准 MCP stdio fixture 已验证真实协议协商、发现、调用与错误，Streamable HTTP 也有
-本地服务协议测试；远程第三方 MCP、真实搜索/第三方 API 仍未联调。
+本地服务协议测试。固定版本 Sequential Thinking 已完成真实多次调用；Fetch 初始化与发现
+通过，但当前网络 DNS 返回 `198.18.x.x`，包括 Microsoft Learn 在内的正文抓取被默认地址
+限制拒绝，尚未验收通过。没有启用绕过限制的选项；远程第三方 MCP、真实搜索/第三方 API 仍未联调。
+
+### 统一工具与执行优化（T0-T5）
+
+导航“工具”统一展示本地、内置 legacy RPC 和标准 MCP，三者不混称协议。
+本地能力包括数据库查询/元数据/预览、内部知识检索，以及 Join、分组求和、比率、差值。
+数据库连接仍在数据源页维护；计算只接受当前运行的已完成依赖，不提供任意 Python 执行。
+计算保留旧 `output` 列名参数；输出单位跟随新列，比率保留分子/分母单位，同单位相除为
+`ratio`，不同单位保留商的单位表达式，缺失单位明确警告而不猜测。
+工具卡可设置类别、启用状态、适用说明、超时和并发上限；计算演示明确标为 SAMPLE。
+
+添加 MCP 的流程为：选择类别及模板 → 填写连接与 capability 映射 → 保存禁用配置 →
+确认可能下载/执行第三方包 → 测试并发现实际 Schema → 逐工具确认类别、只读策略与开关 →
+启用服务器 → 需要时选择 capability 默认提供方。多提供方无明确选择时拒绝猜选。
+新建与编辑服务器分开，同名新增不会覆盖现有连接；编辑后重新保存为禁用状态。
+打开页面和读取目录不探测网络，也不自动安装或启动服务。
+
+预置模板固定为 `uvx mcp-server-fetch==2026.10.10` 和
+`npx -y @modelcontextprotocol/server-sequential-thinking@1.0.0`。
+需要对应的 uvx / Node.js+npx；第三方依赖留在其隔离环境，不升级本项目锁定依赖。
+stdio 使用程序、字符串参数数组、可选工作目录及 `env_refs`；
+HTTP 使用标准 Streamable HTTP endpoint 和 `header_refs`，不是普通 REST 或 SSE URL。
+引用格式为 `{"Authorization":"GENBI_MCP_AUTH"}`，读取该本机环境变量的完整头值，
+不将值发送给规划器或保存到普通导出；首版不实现第三方 OAuth 授权流程。
+
+目录同时生成规划候选、兼容注册表与执行定义。新计划记录 `tool_id`、`capability`、
+`tool_version`，运行冻结连接和定义；实时禁用会阻止后续新调用，不伪称中断在途工作。
+重复发现的时间戳不改变工具定义版本；历史运行仅在冻结定义仍匹配时兼容旧指纹，
+真实 Schema、连接或策略变化仍拒绝静默替换。
+规划目录按相关性选取最多 12 个工具，描述与 Schema 上下文总量不超过 24 KiB，不截断 Schema 后执行。
+Sequential Thinking 仅用于复杂规划的可选子循环，最多 3 次调用；同运行有状态会话串行、
+跨运行隔离，默认关闭，日志/回放只保留公开摘要与计数，不把规划说明当作数值事实。
+Fetch 的截断、非零 `start_index` 或未知完整性保留为 discovery，不把分页末页冒充完整正文或可计算观测。
+
+同步计划 API 与持久任务复用同一 DAG、调用核心和运行队列，合计最多 4 个活动运行、16 个排队运行，
+每运行最多 4 步；全局步骤、工具许可与 MCP 会话分别最多 16 个，运行内会话最多 4 个，
+空闲 60 秒回收。队列满返回 HTTP 503、`Retry-After`；持久任务同时返回关联 `run_id`，终态后可以创建重试。
+许可等待有界、可取消；数据库在途调用仍以适配器实际超时和协作式取消为准。
+工具尝试与模型重试各自记账，不按“步骤开始”重复计入工具预算；工具额度用尽不阻塞仅使用模型的
+分析或用户澄清，但后续工具调用仍受限。
+
+工具配置保存在忽略提交的 `config/tools_config.json`，连接和能力到工具名的映射仍仅在
+`mcp_config.json`；自动发现快照单独缓存，不是可编辑的第二份工具 Schema。
+目录定义最多缓存 16 个版本、发现快照最多保留 64 个服务器。知识分块/分词/文档频率/
+倒排项预计算，最多缓存 8 个内容版本；内容变更失效，冻结旧任务仍使用自己的知识快照。
+大于 4 MiB 的语料不进入共享索引缓存，检索语义与稳定片段引用保持不变。
+
+聊天按会话分页读取摘要，展开才加载历史详情；运行中只在版本变化时重读状态，产物按不可变
+ID 复用，等待输入和终态停止轮询。事件每页最多 500 条，继续按游标补读；JSON 与 CSV 导出
+都在用户点击生成时创建，不在自动刷新中反复回放或导出。
+每个浏览器会话的状态、产物和事件缓存共享 64 MiB 估算驻留预算，并保留每类最多 128 条限制；
+按最近访问淘汰，超大条目完整返回但不驻留缓存，不截断事件或影响导出。公开状态读取不加载私有
+配置快照，取消检查使用仅返回状态的轻量查询。
+
+新增接口：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/tools`、`GET /api/tools/templates` | 脱敏目录及固定模板 |
+| `PUT /api/tools/servers/{id}` | 保存禁用服务器配置；已有 ID 需显式 `replace_existing: true` |
+| `POST /api/tools/servers/{id}/discover` | `{"confirmed":true}` 主动探测与发现 |
+| `POST /api/tools/servers/{id}/enabled` | `{"enabled":true/false}` 启用/禁用 |
+| `PUT /api/tools/definitions/{tool_id}` | 更新逐工具类别/开关/策略 |
+| `PUT /api/tools/providers/{capability}` | 设置明确默认 `tool_id` |
+| `POST /api/tools/trial` | 使用统一校验与预算试运行，不提供任意产物/文件引用 |
+| `GET /api/runs/history?session_id=...&limit=20&before=...` | 分页摘要及 `next_cursor`，支持 `statuses` 筛选 |
+
+旧 `/api/mcp/execute` 保留前缀白名单和兼容输出，同时遵守工具开关与调用许可。
+旧精确 capability 映射保持原提供方，不因新增本地 Fetch 或新模板静默改道；
+尚未发现 Schema 的旧连接不作为通用规划候选。旧 `/api/runs` 历史列表接口保留。
+
+离线回归不下载第三方包。获得执行授权后，可显式运行：
+
+```bash
+GENBI_REAL_MCP=1 .venv/bin/python -m unittest tests.test_mcp_packages -v
+```
+
+Fetch 可通过 `GENBI_FETCH_URL` 指定公开页面；当前 DNS 环境下该正文测试会明确失败，
+需在正常公网解析环境重试，不应启用 `--allow-private-ips` 来将失败包装为通过。
+普通 HTTPS 可访问并不能证明 Fetch 的地址检查通过：本次排查中普通请求返回 HTTP 200，
+但系统解析得到的 `198.18.x.x` 属于非公网地址，Fetch 在发送 robots 请求前就拒绝访问，
+不是网站 robots 规则拒绝。详见 [Fetch 联网排查](mcp_servers/README.md#fetch-联网排查)。
+各阶段完成标记及真实联调边界见 [optimize.md 第 17.10 节](optimize.md#1710-实施阶段与依赖)。
 
 ### 演示闭环（P5）
 

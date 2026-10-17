@@ -30,6 +30,12 @@ class RunStore:
                     run_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
                     PRIMARY KEY (run_id, id)
                 );
+                CREATE INDEX IF NOT EXISTS runs_session
+                    ON runs(json_extract(state, '$.session_id'));
+                CREATE INDEX IF NOT EXISTS runs_database
+                    ON runs(json_extract(state, '$.database'));
+                CREATE INDEX IF NOT EXISTS runs_session_status
+                    ON runs(json_extract(state, '$.session_id'), json_extract(state, '$.status'));
             """)
 
     @contextmanager
@@ -54,11 +60,20 @@ class RunStore:
         return state, True
 
     def get(self, run_id, private=False):
+        column = "private" if private else "state"
         with self.connect() as db:
-            row = db.execute("SELECT state, private FROM runs WHERE id=?", (run_id,)).fetchone()
+            row = db.execute(f"SELECT {column} FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             raise KeyError(run_id)
-        return json.loads(row[1 if private else 0])
+        return json.loads(row[0])
+
+    def status(self, run_id):
+        with self.connect() as db:
+            row = db.execute("SELECT json_extract(state, '$.status') FROM runs WHERE id=?",
+                             (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return row[0]
 
     def update(self, run_id, change, event_type=None, payload=None, artifact=None):
         with self.connect() as db:
@@ -86,8 +101,9 @@ class RunStore:
         return state
 
     def events(self, run_id, after=0):
-        self.get(run_id)
         with self.connect() as db:
+            if db.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone() is None:
+                raise KeyError(run_id)
             rows = db.execute("SELECT event FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 500",
                               (run_id, after)).fetchall()
         return [json.loads(row[0]) for row in rows]
@@ -115,6 +131,39 @@ class RunStore:
         with self.connect() as db:
             rows = db.execute(query + " ORDER BY rowid DESC LIMIT 200", params).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def history_page(self, session_id=None, before=None, limit=20, database=None, statuses=None):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("History page limit must be from 1 to 100")
+        if before is not None and (type(before) is not int or before < 1):
+            raise ValueError("History cursor must be a positive integer")
+        fields = ("run_id", "session_id", "question", "database", "status", "phase", "plan_version",
+                  "event_seq", "created_at", "updated_at")
+        columns = ", ".join(f"json_extract(state, '$.{field}')" for field in fields)
+        filters, parameters = [], []
+        for field, value in (("session_id", session_id), ("database", database)):
+            if value is not None:
+                filters.append(f"json_extract(state, '$.{field}') = ?")
+                parameters.append(value)
+        if statuses is not None:
+            if (not isinstance(statuses, list) or not statuses or any(status not in {
+                    "QUEUED", "RUNNING", "WAITING_INPUT", "CANCELLING", "SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"}
+                    for status in statuses)):
+                raise ValueError("Invalid run history status filter")
+            filters.append("json_extract(state, '$.status') IN (" + ",".join("?" for _ in statuses) + ")")
+            parameters.extend(statuses)
+        if before is not None:
+            filters.append("rowid < ?")
+            parameters.append(before)
+        query = f"SELECT rowid, {columns} FROM runs"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        parameters.append(limit + 1)
+        with self.connect() as db:
+            rows = db.execute(query + " ORDER BY rowid DESC LIMIT ?", parameters).fetchall()
+        selected = rows[:limit]
+        return {"items": [dict(zip(fields, row[1:])) for row in selected],
+                "next_cursor": selected[-1][0] if len(rows) > limit else None}
 
     def replay(self, run_id):
         state = self.get(run_id)

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "categories": {
+    "database": "Database",
+    "knowledge": "Knowledge",
+    "compute": "Computation",
+    "search": "Search",
+    "fetch": "Fetch",
+    "external_api": "External API",
+    "reasoning": "Planning assistance"
+  },
+  "tools": {},
+  "default_providers": {}
+}

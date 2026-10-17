@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from copy import deepcopy
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import requests
 
@@ -125,6 +125,27 @@ class ComputationTests(unittest.TestCase):
         self.assertIsNone(result["data"]["rows"][0][0])
         self.assertEqual(result["data"]["diagnostics"]["zero_denominators"], 1)
 
+    def test_computed_units_follow_output_columns_and_support_chained_calculation(self):
+        inputs = {1: table(["n", "d", "unused"], [[10, 3, 1]],
+                           units={"n": "CNY", "d": "CNY", "unused": "count"})}
+        ratio = compute({"operation": "ratio", "inputs": [1], "numerator": "n",
+                         "denominator": "d", "output": "rate"}, inputs)
+        self.assertEqual(ratio["data"]["units"], {
+            "rate": "ratio", "rate_numerator": "CNY", "rate_denominator": "CNY"})
+        difference = compute({"operation": "difference", "inputs": [2], "numerator": "rate_numerator",
+                              "denominator": "rate_denominator", "output": "net"}, {2: ratio})
+        self.assertEqual(difference["data"]["units"], {"net": "CNY"})
+        self.assertEqual(difference["data"]["rows"], [["7"]])
+        summed = compute({"operation": "aggregate", "inputs": [3], "columns": ["net"]}, {3: difference})
+        self.assertEqual(summed["data"]["units"], {"net": "CNY"})
+        inputs[1]["data"]["units"]["d"] = "count"
+        rate = compute({"operation": "ratio", "inputs": [1], "numerator": "n", "denominator": "d"}, inputs)
+        self.assertEqual(rate["data"]["units"]["ratio"], "(CNY)/(count)")
+        inputs[1]["data"]["units"].pop("d")
+        unknown = compute({"operation": "ratio", "inputs": [1], "numerator": "n", "denominator": "d"}, inputs)
+        self.assertNotIn("ratio", unknown["data"]["units"])
+        self.assertTrue(any("unit is unknown" in warning for warning in unknown["data"]["diagnostics"]["warnings"]))
+
     def test_join_budget_is_checked_before_expansion(self):
         inputs = {1: table(["id"], [[i] for i in range(6000)]),
                   2: table(["id"], [[i] for i in range(6000, 12000)])}
@@ -217,6 +238,24 @@ class ExternalTests(unittest.TestCase):
 
 
 class StandardMCPTests(ConfigTestCase):
+    def test_run_owned_session_reuses_process_and_isolates_another_run(self):
+        from utils.standard_mcp import RunMCPContext
+        settings = {"protocol": "mcp", "type": "stdio", "command": sys.executable,
+                    "args": [str(PROJECT_ROOT / "tests/fixtures/mcp_server.py")], "timeout": 10}
+        first, second = RunMCPContext(), RunMCPContext()
+        try:
+            a = first.call(settings, "counter", {})["result"]
+            b = first.call(settings, "counter", {})["result"]
+            c = second.call(settings, "counter", {})["result"]
+            self.assertEqual((a["calls"], b["calls"], c["calls"]), (1, 2, 1))
+            self.assertEqual(a["pid"], b["pid"])
+            self.assertNotEqual(a["pid"], c["pid"])
+        finally:
+            first.close()
+            second.close()
+        self.assertFalse(first.thread.is_alive())
+        self.assertEqual(first.sessions, {})
+
     def test_real_streamable_http_protocol(self):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -257,8 +296,22 @@ class StandardMCPTests(ConfigTestCase):
         self.assertEqual(info["name"], "GenBI test fixture")
         self.assertIn("echo", [tool["name"] for tool in info["tools"]])
         self.assertEqual(client.call("echo", {"value": 42})["result"]["value"], 42)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "fixture failure"):
             client.call("fail", {})
+
+    def test_grouped_errors_keep_the_root_cause_but_redact_reasoning_content(self):
+        for stateful in (False, True):
+            with self.subTest(stateful=stateful):
+                client = StandardMCPClient({"template": "sequential_thinking"} if stateful else {})
+                error = ExceptionGroup("transport", [
+                    ExceptionGroup("session", [RuntimeError("PRIVATE_SENTINEL refused destination")])])
+                with patch.object(client, "request", new=AsyncMock(side_effect=error)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        client.call("tool", {})
+                if stateful:
+                    self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
+                else:
+                    self.assertIn("PRIVATE_SENTINEL refused destination", str(caught.exception))
 
 
 class CrossSourceRunTests(ConfigTestCase):

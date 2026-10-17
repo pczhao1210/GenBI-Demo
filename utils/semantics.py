@@ -1,7 +1,10 @@
 import json
 import math
 import re
+import hashlib
 from collections import Counter
+from copy import deepcopy
+from functools import lru_cache
 
 
 def parse_json(text):
@@ -70,27 +73,57 @@ def tokens(text):
     return Counter(words)
 
 
+def _build_knowledge(serialized):
+    chunks, terms, postings = [], [], {}
+    for doc in json.loads(serialized).get("documents", []):
+        for i, start in enumerate(range(0, len(doc["text"]), 800)):
+            chunk = {key: value for key, value in doc.items() if key != "text"}
+            chunk.update(chunk_id=f"{doc['id']}:{i}", text=doc["text"][start:start + 900],
+                         position=start)
+            index = len(chunks)
+            chunk_terms = tokens(chunk["title"] + " " + chunk["text"])
+            for term in chunk_terms:
+                postings.setdefault(term, []).append(index)
+            chunks.append(chunk)
+            terms.append(chunk_terms)
+    weights = {term: math.log(1 + len(terms) / (1 + len(indices))) for term, indices in postings.items()}
+    return chunks, terms, postings, weights
+
+
+@lru_cache(maxsize=8)
+def _cached_knowledge(serialized):
+    return _build_knowledge(serialized)
+
+
 class KnowledgeIndex:
     def __init__(self, knowledge):
         validate_knowledge(knowledge)
-        self.chunks = []
-        for doc in knowledge.get("documents", []):
-            for i, start in enumerate(range(0, len(doc["text"]), 800)):
-                chunk = {key: value for key, value in doc.items() if key != "text"}
-                chunk.update(chunk_id=f"{doc['id']}:{i}", text=doc["text"][start:start + 900],
-                             position=start)
-                self.chunks.append(chunk)
-        self.terms = [tokens(chunk["title"] + " " + chunk["text"]) for chunk in self.chunks]
+        serialized = json.dumps(knowledge, sort_keys=True, ensure_ascii=False)
+        self.version = hashlib.sha256(("chunks-800-900:tokens-v1:" + serialized).encode()).hexdigest()
+        # Oversized corpora remain searchable without occupying the shared cache.
+        build = _cached_knowledge if len(serialized.encode()) <= 4 * 1024 * 1024 else _build_knowledge
+        self._chunks, self._terms, self._postings, self._weights = build(serialized)
+
+    @property
+    def chunks(self):
+        return deepcopy(self._chunks)
+
+    @staticmethod
+    def cache_info():
+        return _cached_knowledge.cache_info()
 
     def search(self, query, limit=4, scope=None):
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("Knowledge search limit must be from 1 to 20")
         query_terms = tokens(query)
         results = []
-        for chunk, terms in zip(self.chunks, self.terms):
+        candidates = sorted({index for term in query_terms for index in self._postings.get(term, [])})
+        for index in candidates:
+            chunk, terms = self._chunks[index], self._terms[index]
             if scope and chunk["scope"] not in (scope, "*"):
                 continue
-            score = sum(min(count, terms.get(term, 0)) *
-                        math.log(1 + len(self.terms) / (1 + sum(term in t for t in self.terms)))
+            score = sum(min(count, terms.get(term, 0)) * self._weights.get(term, 0)
                         for term, count in query_terms.items())
             if score:
-                results.append({**chunk, "score": score})
+                results.append({**deepcopy(chunk), "score": score})
         return sorted(results, key=lambda item: (-item["score"], item["chunk_id"]))[:limit]

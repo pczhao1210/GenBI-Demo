@@ -8,7 +8,9 @@
 | `database_config.json` | MySQL / Athena 连接配置，根键 `databases` |
 | `llm_config.json` | LLM 配置，根键 `llm_config` |
 | `schema_config.json` | 表结构和业务描述，根键 `schemas` |
-| `mcp_config.json` | 内置 stdio RPC 脚本配置，根键 `mcp_servers` |
+| `mcp_config.json` | 内置 legacy RPC / 标准 MCP 连接及 capability 映射，根键 `mcp_servers` |
+| `tools_config.json` | `schema_version: 1`；类别、逐工具覆盖、调用限制与默认提供方 |
+| `tool_discovery.json` | 自动发现快照、连接指纹、时间与 Schema 指纹，不手工维护 |
 
 缺少 LLM、数据库或 Schema 配置时明确报错，不自动使用模板中的假凭据。
 工具配置仅在文件不存在时从[示例](example_mcp_config.json)初始化；
@@ -45,4 +47,18 @@ JSON 损坏会显式报错，不会静默重置配置。
 `status: "active"` 允许按需调用，`inactive` 禁止业务调用；
 脚本信息探测不受启用状态影响。首次初始化默认启用三个内置工具。
 支持实际的 `command` / `args` 配置和可选的进程 `timeout`（秒）。
-当前只支持内部 stdio RPC，不支持 SSE 或完整 MCP 协议。
+内置脚本仍使用内部 stdio RPC；标准 MCP 使用 `protocol: "mcp"`，
+传输方式为 `stdio` 或 `streamable_http`，不支持 SSE。连接和 capability 到实际工具名
+的映射只保存在本文件，不复制到工具配置中。
+
+[工具配置示例](example_tools_config.json)中的类别使用稳定 ID；修改显示名称不改变工具身份。
+覆盖键为 `local:database.query`、`local:knowledge.search`、
+`local:compute.ratio` 或 `mcp:<server_id>:<tool_name>` 等稳定 `tool_id`。
+默认提供方保存在 `default_providers`，一个能力有多个提供方时必须明确选择。
+新增服务器保存为禁用，并要求逐工具确认后启用；已有内置列表和旧标准 MCP 映射不改写。
+新管理入口的单服务器/单工具读改写采用文件锁及原子保存，保留其他服务器及未知字段。
+
+标准 stdio 可配置 `cwd`、`env_refs`，HTTP 可配置 `header_refs`；引用格式为
+`{"目标变量或认证头名":"本机环境变量名"}`，不在配置中填写认证值。
+发现缓存最多 64 个服务器，连接改变后必须重新发现；启用状态或工具覆盖改变会立即改变目录缓存键。
+知识索引与目录的内存缓存有容量限制，缓存不是配置编辑入口。

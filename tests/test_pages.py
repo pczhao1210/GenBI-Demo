@@ -8,6 +8,7 @@ from utils.config_manager import PROJECT_ROOT
 from utils.bi_service import BIService
 from utils.run_service import RunService
 from utils.run_store import RunStore
+from utils.presentation import csv_export
 
 
 class PageTests(ConfigTestCase):
@@ -40,7 +41,11 @@ class PageTests(ConfigTestCase):
             self.addCleanup(patcher.stop)
 
     def page(self, name):
-        app = AppTest.from_file(str(PROJECT_ROOT / "pages" / name), default_timeout=15).run()
+        if name in ("tools.py", "mcp_management.py"):
+            app = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=15).run()
+            app.switch_page("pages/tools.py").run()
+        else:
+            app = AppTest.from_file(str(PROJECT_ROOT / "pages" / name), default_timeout=15).run()
         self.assertEqual(len(app.exception), 0, str(app.exception))
         return app
 
@@ -120,6 +125,22 @@ class PageTests(ConfigTestCase):
         app.selectbox[0].set_value("legacy-mysql").run()
         self.assertEqual(len(app.dataframe), 1)
 
+    def test_chat_refresh_does_not_reload_artifacts_or_generate_exports(self):
+        app = self.page("chat.py")
+        with patch.object(self.runs.store, "artifact", wraps=self.runs.store.artifact) as read, \
+                patch.object(self.runs.store, "replay", wraps=self.runs.store.replay) as replay, \
+                patch("utils.result_view.csv_export", wraps=csv_export) as csv:
+            app.chat_input[0].set_value("show rows").run()
+            initial = read.call_count
+            app.run()
+            app.run()
+            self.assertEqual(read.call_count, initial)
+            replay.assert_not_called()
+            csv.assert_not_called()
+            run_id = self.runs.store.history()[0]["run_id"]
+            app.button(key=f"prepare_export_{run_id}").click().run()
+            self.assertEqual(replay.call_count, 1)
+
     def test_chat_cancel_and_clear_remove_pending_plan(self):
         self.bi.identify_intent.return_value = "analysis"
         self.bi.analysis_plan.return_value = plan()
@@ -165,9 +186,38 @@ class PageTests(ConfigTestCase):
 
     def test_management_disables_calls_in_configuration(self):
         app = self.page("mcp_management.py")
+        self.mcp.get_server_info.assert_not_called()
         app.button(key="stop_mysql").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(self.config.load_mcp_config()["mysql"]["status"], "inactive")
+
+    @patch("utils.tool_management.shutil.which", return_value="/fixture/uvx")
+    def test_tools_template_discovery_per_tool_enable_and_trial(self, which):
+        app = self.page("tools.py")
+        app.text_input(key="server_name_fetch").set_value("fetch_fixture")
+        self.click(app, "保存为禁用配置")
+        server = self.config.load_mcp_config()["fetch_fixture"]
+        self.assertEqual(server["status"], "inactive")
+        self.mcp.get_server_info.assert_not_called()
+        self.mcp.get_server_info.return_value = {"name": "fetch fixture", "tools": [{
+            "name": "fetch", "description": "Fetch a URL",
+            "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+            "annotations": {"readOnlyHint": True}}]}
+        app.checkbox(key="confirm_probe_fetch_fixture").check().run()
+        app.button(key="check_fetch_fixture").click().run()
+        self.assertEqual(len(app.exception), 0, str(app.exception))
+        tool_id = "mcp:fetch_fixture:fetch"
+        app.checkbox(key=f"enabled_{tool_id}").check()
+        next(button for button in app.button if f"tool_form_{tool_id}" in (button.key or "")).click().run()
+        app.button(key="start_fetch_fixture").click().run()
+        app.button(key=f"default_{tool_id}_external.fetch").click().run()
+        self.assertEqual(self.config.load_tools_config()["default_providers"]["external.fetch"], tool_id)
+        self.mcp.call_mcp_server.return_value = {"result": {"content": [{"type": "text", "text": "Fixture source"}]}}
+        app.text_area(key=f"trial_arguments_{tool_id}").set_value('{"url":"https://example.com"}')
+        app.button(key=f"trial_{tool_id}").click().run()
+        self.assertEqual(len(app.exception), 0, str(app.exception))
+        self.mcp.call_mcp_server.assert_called_once()
+        self.assertEqual(self.mcp.get_server_info.call_count, 1)
 
     def test_management_discovers_unregistered_servers_without_overwriting_config(self):
         previous = self.config.load_mcp_config()
@@ -187,9 +237,11 @@ class PageTests(ConfigTestCase):
             "status": "active", "capabilities": {"price.history": "history"},
         }})
         self.mcp.get_server_info.return_value = {
-            "name": "fixture", "protocol": "2025-06-18", "tools": [{"name": "history"}],
+            "name": "fixture", "protocol": "2025-06-18",
+            "tools": [{"name": "history", "inputSchema": {"type": "object"}}],
         }
         app = self.page("mcp_management.py")
+        app.checkbox(key="confirm_probe_remote").check().run()
         app.button(key="check_remote").click().run()
         self.assertEqual(len(app.exception), 0, str(app.exception))
         self.assertEqual(self.config.load_mcp_config()["remote"]["capabilities"], {"price.history": "history"})

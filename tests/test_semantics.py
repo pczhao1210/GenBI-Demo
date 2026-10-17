@@ -66,6 +66,28 @@ class SemanticTests(ConfigTestCase):
         self.assertEqual(chunk["chunk_id"], "one:0")
         self.assertEqual(chunk["version"], "3")
 
+    def test_index_precomputes_once_and_keeps_frozen_versions(self):
+        from utils.semantics import _cached_knowledge, tokens
+        _cached_knowledge.cache_clear()
+        knowledge = {"documents": [
+            {"id": "one", "title": "Conversion ratio", "text": "Orders divided by visits 转化率",
+             "source": "manual#2", "version": "3", "scope": "retail"},
+            {"id": "two", "title": "Orders", "text": "Orders count",
+             "source": "manual#3", "version": "1", "scope": "*"},
+        ]}
+        with patch("utils.semantics.tokens", wraps=tokens) as tokenize:
+            first = KnowledgeIndex(knowledge)
+            expected = first.search("conversion orders", scope="retail")
+            second = KnowledgeIndex(knowledge)
+            self.assertEqual(second.search("conversion orders", scope="retail"), expected)
+            self.assertEqual(tokenize.call_count, 4)
+        knowledge["documents"][0].update(version="4", text="Updated terminology")
+        updated = KnowledgeIndex(knowledge)
+        self.assertNotEqual(first.version, updated.version)
+        self.assertEqual(first.search("conversion", scope="retail")[0]["version"], "3")
+        self.assertEqual(updated.search("terminology", scope="retail")[0]["version"], "4")
+        self.assertEqual(KnowledgeIndex.cache_info().maxsize, 8)
+
     def test_role_routing_and_budget_never_silently_fallback(self):
         roles = {"reasoning": {"provider": "custom", "custom": {"model": "strong"}}}
         self.config.save_model_roles(roles)

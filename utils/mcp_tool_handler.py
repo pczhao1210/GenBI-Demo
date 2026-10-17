@@ -10,13 +10,16 @@ from typing import Dict, Any, List, Optional
 from jsonschema import Draft202012Validator
 from utils.mcp_tools_registry import mcp_tool_registry
 from utils.mcp_client import MCPClient
+from utils.config_manager import ConfigManager
 
 class MCPToolCallHandler:
     """处理符合MCP协议的工具调用"""
     
-    def __init__(self, mcp_client=None):
+    def __init__(self, mcp_client=None, config_manager=None):
         self.mcp_client = mcp_client or MCPClient()
         self.tool_registry = mcp_tool_registry
+        self.config = config_manager or (
+            self.mcp_client.config_manager if isinstance(self.mcp_client, MCPClient) else ConfigManager())
     
     def generate_tool_definitions_for_llm(self) -> List[Dict[str, Any]]:
         """
@@ -73,26 +76,23 @@ class MCPToolCallHandler:
                 "error": f"参数验证失败: {validation_result['error']}",
                 "code": "INVALID_PARAMS"
             }
+        tool_id = tool_def.get("tool_id")
+        if tool_id and not self.config.load_tools_config()["tools"].get(tool_id, {}).get("enabled", True):
+            return {"error": f"Tool disabled: {tool_id}", "code": "TOOL_DISABLED"}
         
         # 根据工具名称路由到相应的执行函数
         try:
+            from utils.model_router import ToolBudget
+            from utils.tool_execution import ToolInvoker
+            invoker = ToolInvoker(self.config, self.mcp_client, ToolBudget())
             if tool_def.get("capability", "").startswith("database."):
-                from utils.config_manager import ConfigManager
-                from utils.datasources import DatabaseAdapter
-                source = ConfigManager().resolve_datasource(arguments["datasource_id"])
-                adapter = DatabaseAdapter(source, self.mcp_client)
-                capability = tool_def["capability"]
-                if capability == "database.query":
-                    return adapter.query(arguments["sql"])
-                if capability == "database.preview":
-                    return adapter.preview(arguments["table"])
-                return adapter.metadata(arguments.get("table"))
+                return invoker.call(tool_def["capability"], arguments, tool_id)
             if tool_name.startswith("athena_"):
-                return self._execute_athena_tool(tool_name, arguments)
+                return invoker.compatibility_call(tool_def, self._execute_athena_tool, tool_name, arguments)
             elif tool_name.startswith("mysql_"):
-                return self._execute_mysql_tool(tool_name, arguments)
+                return invoker.compatibility_call(tool_def, self._execute_mysql_tool, tool_name, arguments)
             elif tool_name.startswith("web_"):
-                return self._execute_web_tool(tool_name, arguments)
+                return invoker.compatibility_call(tool_def, self._execute_web_tool, tool_name, arguments)
             else:
                 return {
                     "error": f"不支持的工具类型: {tool_name}",
@@ -133,7 +133,7 @@ class MCPToolCallHandler:
             return isinstance(value, list)
         return True  # 未知类型，允许通过
     
-    def _execute_athena_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_athena_tool(self, tool_name: str, arguments: Dict[str, Any], *, timeout=None) -> Dict[str, Any]:
         """执行Athena相关工具"""
         config = arguments.get("config", {})
         
@@ -145,7 +145,7 @@ class MCPToolCallHandler:
                 "athena",
                 "execute_query",
                 config,
-                {"sql": sql, "database": database}
+                {"sql": sql, "database": database}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):
@@ -173,7 +173,7 @@ class MCPToolCallHandler:
                 "athena",
                 "describe_table",
                 config,
-                {"table_name": table_name, "database": database}
+                {"table_name": table_name, "database": database}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):
@@ -193,7 +193,7 @@ class MCPToolCallHandler:
                 }
             }
     
-    def _execute_mysql_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_mysql_tool(self, tool_name: str, arguments: Dict[str, Any], *, timeout=None) -> Dict[str, Any]:
         """执行MySQL相关工具"""
         config = arguments.get("config", {})
         
@@ -204,7 +204,7 @@ class MCPToolCallHandler:
                 "mysql",
                 "execute_query",
                 config,
-                {"sql": sql}
+                {"sql": sql}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):
@@ -231,7 +231,7 @@ class MCPToolCallHandler:
                 "mysql",
                 "describe_table",
                 config,
-                {"table_name": table_name}
+                {"table_name": table_name}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):
@@ -250,7 +250,7 @@ class MCPToolCallHandler:
                 }
             }
     
-    def _execute_web_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_web_tool(self, tool_name: str, arguments: Dict[str, Any], *, timeout=None) -> Dict[str, Any]:
         """执行Web相关工具"""
         
         if tool_name == "web_search":
@@ -260,7 +260,7 @@ class MCPToolCallHandler:
             result = self.mcp_client.call_mcp_server(
                 "playwright",
                 "search_web",
-                {"query": query, "max_results": max_results}
+                {"query": query, "max_results": max_results}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):
@@ -286,7 +286,7 @@ class MCPToolCallHandler:
             result = self.mcp_client.call_mcp_server(
                 "playwright",
                 "fetch_page",
-                {"url": url}
+                {"url": url}, timeout=timeout
             )
             
             if "error" in result or "error" in result.get("result", {}):

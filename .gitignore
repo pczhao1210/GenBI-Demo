@@ -47,6 +47,8 @@ config/semantics.json
 config/knowledge.json
 config/model_roles.json
 config/methods.json
+config/tools_config.json
+config/tool_discovery.json
 !config/example_*.json
 
 # Logs

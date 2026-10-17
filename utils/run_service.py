@@ -2,19 +2,19 @@ import hashlib
 import json
 import logging
 import os
-import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from copy import deepcopy
 from functools import lru_cache
 from uuid import uuid4
+from datetime import datetime, timezone
 
 from utils.bi_service import BIService, validate_plan
 from utils.config_manager import ConfigManager
 from utils.run_store import RunStore, utcnow
+from utils.execution import TERMINAL, STEP_TERMINAL, execute_dag, outcome
+from utils.resources import BusyError, run_queue
+from utils.run_context import FrozenConfig, snapshot_config, step_compatible
 
-TERMINAL = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"}
-STEP_TERMINAL = {"SUCCEEDED", "FAILED", "BLOCKED", "SKIPPED", "CANCELLED"}
 logger = logging.getLogger(__name__)
 
 
@@ -22,48 +22,8 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def snapshot_config(config):
-    sources = config.load_datasources()
-    return {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
-            "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources,
-            "semantics": config.load_semantics(), "knowledge": config.load_knowledge(),
-            "model_roles": config.load_model_roles(), "methods": config.load_methods()}
-
-
-class FrozenConfig:
-    def __init__(self, snapshot):
-        self.snapshot = snapshot
-
-    def load_database_config(self):
-        return deepcopy(self.snapshot["databases"])
-
-    def load_schema_config(self):
-        return deepcopy(self.snapshot["schemas"])
-
-    def load_llm_config(self):
-        return deepcopy(self.snapshot["llm"])
-
-    def load_mcp_config(self):
-        return deepcopy(self.snapshot["mcp"])
-
-    def load_datasources(self):
-        return deepcopy(self.snapshot["sources"])
-
-    def resolve_datasource(self, identifier):
-        from utils.datasources import resolve_source
-        return resolve_source(self.load_datasources(), identifier)
-
-    def load_semantics(self):
-        return deepcopy(self.snapshot["semantics"])
-
-    def load_knowledge(self):
-        return deepcopy(self.snapshot["knowledge"])
-
-    def load_model_roles(self):
-        return deepcopy(self.snapshot["model_roles"])
-
-    def load_methods(self):
-        return deepcopy(self.snapshot["methods"])
+def elapsed_since(timestamp):
+    return max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds())
 
 
 class RunService:
@@ -71,8 +31,6 @@ class RunService:
         self.store = store or RunStore()
         self.config = config or ConfigManager()
         self.service_factory = service_factory
-        self._threads = {}
-        self._lock = threading.Lock()
 
     def submit(self, question, database="mysql", session_id=None, submission_id=None,
                plan=None, parent_run_id=None, reuse=None, datasource_ids=None):
@@ -92,6 +50,7 @@ class RunService:
                  "limits": {"max_steps": 30, "active_seconds": 300, "tool_calls": 64,
                             "model_calls": 32, "replans": 2, "stagnation": 2},
                  "source_version": fingerprint(snapshot), "cancel_capability": "cooperative"}
+        state.update(queued_at=state["created_at"], queue_seconds=0, waiting_seconds=0)
         identifiers = datasource_ids or [database]
         state["datasource_ids"] = list(dict.fromkeys(identifiers))
         previous = next((run for run in self.store.history(session_id)
@@ -111,12 +70,21 @@ class RunService:
         return self.store.get(state["run_id"])
 
     def start(self, run_id):
-        with self._lock:
-            if run_id in self._threads and self._threads[run_id].is_alive():
-                return
-            thread = threading.Thread(target=self.execute, args=(run_id,), daemon=True)
-            self._threads[run_id] = thread
-            thread.start()
+        if self.store.status(run_id) == "QUEUED":
+            try:
+                future = run_queue.submit((str(self.store.path), run_id), self.execute, run_id)
+            except BusyError as exc:
+                def reject(s):
+                    if s["status"] == "QUEUED":
+                        s.update(status="FAILED", error=str(exc))
+                self.store.update(run_id, reject, "admission_rejected", {"reason": str(exc)})
+                exc.run_id = run_id
+                raise
+            future.add_done_callback(lambda completed: self._restart_if_queued(run_id))
+
+    def _restart_if_queued(self, run_id):
+        if self.store.status(run_id) == "QUEUED":
+            self.start(run_id)
 
     def _waiting(self, run_id, kind, prompt, step_id=None):
         request = {"request_id": uuid4().hex, "request_kind": kind, "prompt": prompt,
@@ -127,7 +95,7 @@ class RunService:
             if s["status"] == "CANCELLING":
                 s.update(status="CANCELLED", owner=None)
                 return
-            s.update(status="WAITING_INPUT", request=request, owner=None)
+            s.update(status="WAITING_INPUT", request=request, owner=None, waiting_at=utcnow())
         self.store.update(run_id, change, "input_requested", request)
 
     def respond(self, run_id, request_id, plan_version, response):
@@ -153,7 +121,8 @@ class RunService:
                 else:
                     s["steps"][str(request["step_id"])] = {"status": "SUCCEEDED", "artifact_id": artifact,
                                                            "validity": "CURRENT"}
-            s.update(status="QUEUED", request=None, confirmed=True)
+            s.update(status="QUEUED", request=None, confirmed=True, queued_at=utcnow(),
+                     waiting_seconds=s.get("waiting_seconds", 0) + elapsed_since(s.get("waiting_at", s["updated_at"])))
         return self.store.update(run_id, change, "input_received", {"request_id": request_id},
                                  artifact=(artifact, {"status": "success", "evidence_class": "user_input",
                                                       "data": response}) if artifact else None)
@@ -175,16 +144,19 @@ class RunService:
                 return
             s["status"] = "CANCELLING" if s["status"] == "RUNNING" else "CANCELLED"
             s["request"] = None
-        return self.store.update(run_id, change, "cancel_requested")
+        state = self.store.update(run_id, change, "cancel_requested")
+        if state["status"] == "CANCELLED":
+            run_queue.cancel((str(self.store.path), run_id))
+        return state
 
     def _cancel_at_checkpoint(self, run_id):
-        state = self.store.get(run_id)
-        if state["status"] == "CANCELLING":
+        status = self.store.status(run_id)
+        if status == "CANCELLING":
             def stop(s):
                 if s["status"] == "CANCELLING":
                     s.update(status="CANCELLED", owner=None, request=None)
-            state = self.store.update(run_id, stop, "run_cancelled")
-        return state["status"] in TERMINAL
+            status = self.store.update(run_id, stop, "run_cancelled")["status"]
+        return status in TERMINAL
 
     def recover(self, run_id):
         def change(s):
@@ -205,7 +177,8 @@ class RunService:
             for step in s["steps"].values():
                 if step["status"] == "RUNNING":
                     step.update(status="PENDING", attempt_id=None)
-            s.update(status="CANCELLED" if s["status"] == "CANCELLING" else "QUEUED", owner=None)
+            s.update(status="CANCELLED" if s["status"] == "CANCELLING" else "QUEUED",
+                     owner=None, queued_at=utcnow())
         return self.store.update(run_id, change, "recovered")
 
     def retry(self, run_id, refresh=False):
@@ -213,13 +186,16 @@ class RunService:
         if previous["status"] not in TERMINAL:
             raise ValueError("Only terminal runs can be retried")
         current = snapshot_config(self.config)
+        original = self.store.get(run_id, private=True)["snapshot"]
         reuse, payloads = {}, {}
-        if not refresh and previous["source_version"] == fingerprint(current) and previous["plan"]:
+        if not refresh and previous["plan"]:
             for definition in validate_plan(previous["plan"])["steps"]:
                 key = str(definition["step_id"])
                 step = previous["steps"].get(key, {})
                 dependencies = definition["dependencies"] + definition["optional_dependencies"]
                 if (step.get("status") == "SUCCEEDED" and step.get("validity") == "CURRENT"
+                        and (previous["source_version"] == fingerprint(current)
+                             or step_compatible(definition, original, current))
                         and all(str(ref) in reuse for ref in dependencies)):
                     result = self.store.artifact(run_id, step["artifact_id"])
                     reuse[key] = dict(step)
@@ -248,7 +224,8 @@ class RunService:
         def claim(s):
             nonlocal claimed
             if s["status"] == "QUEUED":
-                s.update(status="RUNNING", owner=os.getpid())
+                s.update(status="RUNNING", owner=os.getpid(), queue_seconds=s.get("queue_seconds", 0)
+                         + elapsed_since(s.get("queued_at", s["created_at"])))
                 claimed = True
         self.store.update(run_id, claim, "start_requested")
         if not claimed:
@@ -261,8 +238,13 @@ class RunService:
             snapshot = self.store.get(run_id, private=True)["snapshot"]
             service = self.service_factory(config_manager=FrozenConfig(snapshot))
             if isinstance(service, BIService):
+                from utils.tool_execution import ToolInvoker
+                service._invoker = ToolInvoker(service.config, service.mcp, service.tools,
+                                                state["datasource_ids"], self.config)
+                service._invoker.cancelled = lambda: self.store.status(run_id) in {"CANCELLING", "CANCELLED"}
                 service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
                 service.router.deadline = started + state["limits"]["active_seconds"] - state["active_seconds"]
+                service._invoker.deadline = service.router.deadline
                 service.tools.max_calls = state["limits"]["tool_calls"] - len(state.get("tool_records", []))
             if state["plan"] is None:
                 understanding = state.get("understanding")
@@ -323,6 +305,8 @@ class RunService:
                              error=str(exc), owner=None)
             self.store.update(run_id, failed, "run_failed", {"error": str(exc)})
         finally:
+            if "service" in locals() and isinstance(service, BIService):
+                service.close()
             records = getattr(service.router, "records", []) if "service" in locals() else []
             if not isinstance(records, list):
                 records = []
@@ -333,10 +317,12 @@ class RunService:
                 tool_records=s.get("tool_records", []) + tool_records))
 
     def _dag(self, run_id, service, started):
-        self.store.update(run_id, lambda s: s.update(phase="EXECUTE"), "phase_changed",
-                          {"phase": "EXECUTE"})
         state = self.store.get(run_id)
         plan = validate_plan(state["plan"])
+        if isinstance(service, BIService):
+            plan = service.bind_plan(plan, state["database"], state["datasource_ids"])
+            self.store.update(run_id, lambda s: s.update(
+                plan=plan, tool_catalog_version=service.invoker.catalog.version))
         if isinstance(service, BIService) and any(s["step_type"] == "sql_query" for s in plan["steps"]):
             allowed = {service.config.resolve_datasource(ref)["datasource_id"] for ref in state["datasource_ids"]}
             for step in plan["steps"]:
@@ -346,109 +332,20 @@ class RunService:
                         raise ValueError("Plan references a datasource outside the frozen active set")
                     step["datasource_id"] = target["datasource_id"]
             self.store.update(run_id, lambda s: s.update(plan=plan))
-        if len(plan["steps"]) > state["limits"]["max_steps"]:
-            raise ValueError("Plan exceeds step budget")
-        futures = {}
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            while True:
-                state = self.store.get(run_id)
-                cancelled = state["status"] in {"CANCELLING", "CANCELLED"}
-                exhausted = (state["active_seconds"] + time.monotonic() - started
-                             > state["limits"]["active_seconds"])
-                for step in plan["steps"]:
-                    key = str(step["step_id"])
-                    existing = state["steps"].get(key, {})
-                    if existing.get("status") in STEP_TERMINAL | {"RUNNING"}:
-                        continue
-                    dependencies = [state["steps"].get(str(ref), {}) for ref in step["dependencies"]]
-                    optional = [state["steps"].get(str(ref), {}) for ref in step["optional_dependencies"]]
-                    calls_exhausted = self.store.get(run_id).get("tool_calls", 0) >= state["limits"]["tool_calls"]
-                    if cancelled or exhausted or calls_exhausted:
-                        self._step_state(run_id, key, {"status": "CANCELLED" if cancelled else "BLOCKED",
-                                                       "error": "Cancelled" if cancelled else "Execution budget exhausted"})
-                    elif any(item.get("status") in STEP_TERMINAL - {"SUCCEEDED"} for item in dependencies):
-                        self._step_state(run_id, key, {"status": "BLOCKED", "error": "Required dependency failed"})
-                    elif all(item.get("status") == "SUCCEEDED" for item in dependencies) and all(
-                            item.get("status") in STEP_TERMINAL for item in optional):
-                        if len(futures) >= 4:
-                            continue
-                        if step["step_type"] == "user_input":
-                            if futures:
-                                continue
-                            self._waiting(run_id, "clarification", step.get("description", "Provide input"),
-                                          step["step_id"])
-                            return
-                        inputs = {}
-                        for ref in step["dependencies"] + step["optional_dependencies"]:
-                            item = state["steps"][str(ref)]
-                            inputs[ref] = (self.store.artifact(run_id, item["artifact_id"])
-                                           if item["status"] == "SUCCEEDED"
-                                           else {"status": "error", "message": item.get("error")})
-                        attempt = uuid4().hex
-                        accepted = False
-                        def begin(s):
-                            nonlocal accepted
-                            if s["status"] != "RUNNING":
-                                return
-                            accepted = True
-                            s["steps"].setdefault(key, {}).update(
-                                status="RUNNING", attempt_id=attempt, validity="CURRENT",
-                                attempt_count=existing.get("attempt_count", 0) + 1)
-                            s["tool_calls"] = s.get("tool_calls", 0) + 1
-                        self.store.update(run_id, begin, "step_started", {"step_id": key, "attempt_id": attempt})
-                        if not accepted:
-                            continue
-                        future = pool.submit(self._invoke, run_id, service, step,
-                                             state.get("normalized_question", state["question"]),
-                                             step.get("datasource_id", state["database"]), inputs)
-                        futures[future] = (key, attempt, state["plan_version"])
-                if not futures:
-                    state = self.store.get(run_id)
-                    if all(state["steps"].get(str(step["step_id"]), {}).get("status") in STEP_TERMINAL
-                           for step in plan["steps"]):
-                        break
-                    continue
-                done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
-                for future in done:
-                    key, attempt, version = futures.pop(future)
-                    try:
-                        payload = future.result()
-                        if not isinstance(payload, dict) or payload.get("status") != "success":
-                            raise RuntimeError("Tool returned an invalid or unsuccessful result")
-                        artifact = self.store.put_artifact(run_id, payload)
-                        result = {"status": "SUCCEEDED", "artifact_id": artifact, "validity": "CURRENT"}
-                    except CancelledError:
-                        result = {"status": "CANCELLED", "validity": "CURRENT"}
-                    except Exception as exc:
-                        logger.exception("Run %s step %s failed", run_id, key)
-                        result = {"status": "FAILED", "error": str(exc), "validity": "CURRENT"}
-                        current = self.store.get(run_id)
-                        if (isinstance(exc, (TimeoutError, ConnectionError))
-                                and current["status"] == "RUNNING"
-                                and current["steps"][key]["attempt_count"] <= 2):
-                            result["status"] = "PENDING"
-                    def merge(s):
-                        if (s["plan_version"] == version and
-                                s["steps"][key].get("attempt_id") == attempt):
-                            s["steps"][key].update(result)
-                    self.store.update(run_id, merge, "step_finished",
-                                      {"step_id": key, "attempt_id": attempt, **result})
+        def request_input(step):
+            self._waiting(run_id, "clarification", step.get("description", "Provide input"), step["step_id"])
+            return True
+        execute_dag(self.store, run_id, service, started, request_input)
         if not self.store.get(run_id).get("analysis_mode"):
-            self._finish(run_id, len(plan["steps"]))
+            if self.store.status(run_id) != "WAITING_INPUT":
+                self._finish(run_id, len(plan["steps"]))
 
     def _finish(self, run_id, total):
         def finish(s):
             if s["status"] in TERMINAL:
                 return
             successes = sum(item["status"] == "SUCCEEDED" for item in s["steps"].values())
-            required = [step for step in s["plan"]["steps"] if step.get("required", True)]
-            required_successes = sum(s["steps"].get(str(step["step_id"]), {}).get("status") == "SUCCEEDED"
-                                     for step in required)
-            deliverables = sum(s["steps"].get(str(step["step_id"]), {}).get("status") == "SUCCEEDED"
-                               for step in required if step["step_type"] != "user_input")
-            status = ("CANCELLED" if s["status"] == "CANCELLING" else
-                      "SUCCEEDED" if required_successes == len(required) and successes else
-                      "PARTIAL" if deliverables else "FAILED")
+            status = outcome(s)
             s.update(status=status, phase="RENDER", owner=None,
                      answer_sufficiency=s.get("answer_sufficiency") or ("QUALIFIED" if successes else "INSUFFICIENT"))
         self.store.update(run_id, finish, "run_finished")
@@ -501,7 +398,7 @@ class RunService:
                     package["gaps"].append("Analysis stopped at the configured progress or execution budget.")
                     package["next_plan"] = None
                 self.store.update(run_id, lambda s: s.update(phase="SYNTHESIZE", conclusion=package))
-                if self.store.get(run_id)["status"] == "CANCELLING":
+                if self.store.status(run_id) == "CANCELLING":
                     self._finish(run_id, len(state["plan"]["steps"]))
                     return
                 report = service.present(package)
@@ -509,7 +406,9 @@ class RunService:
                 self._finish(run_id, len(state["plan"]["steps"]))
                 return
             ledger["replans"] += 1
-            self._replace_plan(run_id, package["next_plan"], ledger)
+            self._replace_plan(run_id, service.bind_plan(
+                package["next_plan"], state["database"], state["datasource_ids"])
+                if isinstance(service, BIService) else package["next_plan"], ledger)
 
     def _replace_plan(self, run_id, plan, ledger):
         plan = validate_plan(plan)
@@ -538,15 +437,6 @@ class RunService:
             "added": sorted({s["step_id"] for s in plan["steps"]} - set(old_steps)),
             "removed": sorted(set(old_steps) - {s["step_id"] for s in plan["steps"]})})
 
-    def _step_state(self, run_id, key, result):
-        self.store.update(run_id, lambda s: s["steps"].setdefault(key, {}).update(result),
-                          "step_state", {"step_id": key, **result})
-
-    def _invoke(self, run_id, service, step, question, database, inputs):
-        if self.store.get(run_id)["status"] in {"CANCELLING", "CANCELLED"}:
-            raise CancelledError()
-        return service.execute_step(step, question, database, inputs)
-
     def refine(self, run_id, request_id, plan_version, feedback):
         if not feedback.strip():
             raise ValueError("Plan feedback cannot be empty")
@@ -558,17 +448,25 @@ class RunService:
         service = self.service_factory(config_manager=FrozenConfig(snapshot))
         started = time.monotonic()
         if isinstance(service, BIService):
+            from utils.tool_execution import ToolInvoker
+            service._invoker = ToolInvoker(service.config, service.mcp, service.tools,
+                                            state["datasource_ids"], self.config)
             service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
             service.router.deadline = started + state["limits"]["active_seconds"] - state["active_seconds"]
+            service._invoker.deadline = service.router.deadline
+            service.tools.max_calls = state["limits"]["tool_calls"] - len(state.get("tool_records", []))
         try:
             plan = service.analysis_plan(state.get("normalized_question", state["question"]), state["database"],
                                          state["plan"], feedback, state["datasource_ids"])
             return self.revise(run_id, plan, request_id, plan_version)
         finally:
+            if isinstance(service, BIService):
+                service.close()
             records = service.router.records if isinstance(service, BIService) else []
             self.store.update(run_id, lambda s: s.update(
                 active_seconds=s["active_seconds"] + time.monotonic() - started,
-                model_calls=s.get("model_calls", []) + records))
+                model_calls=s.get("model_calls", []) + records,
+                tool_records=s.get("tool_records", []) + (service.tools.records if isinstance(service, BIService) else [])))
 
 
 @lru_cache(maxsize=1)

@@ -59,6 +59,13 @@ def history(session_id: str | None = None):
     return get_run_service().store.history(session_id)
 
 
+@router.get("/history")
+def history_page(session_id: str | None = None, before: int | None = Query(None, ge=1),
+                 limit: int = Query(20, ge=1, le=100), database: str | None = None,
+                 statuses: list[str] | None = Query(None)):
+    return get_run_service().store.history_page(session_id, before, limit, database, statuses)
+
+
 @router.get("/{run_id}")
 def snapshot(run_id: str):
     return require_run(run_id).store.get(run_id)

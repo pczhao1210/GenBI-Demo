@@ -113,7 +113,7 @@ class MCPTests(ConfigTestCase):
 
     def test_handler_uses_schema_validation_and_propagates_nested_errors(self):
         self.mcp.call_mcp_server_with_config.return_value = {"result": {"error": "query failed"}}
-        handler = MCPToolCallHandler(self.mcp)
+        handler = MCPToolCallHandler(self.mcp, self.config)
         config = {"host": "localhost", "username": "u", "password": "p", "database": "db"}
         result = handler.execute_tool_call("mysql_query", {"sql": "SELECT 1", "config": config})
         self.assertFalse(result["success"])
@@ -128,7 +128,7 @@ class MCPTests(ConfigTestCase):
 
     def test_handler_matches_declared_output_shape(self):
         self.mcp.call_mcp_server_with_config.return_value = query_response()
-        result = MCPToolCallHandler(self.mcp).execute_tool_call(
+        result = MCPToolCallHandler(self.mcp, self.config).execute_tool_call(
             "athena_query", {"sql": "SELECT 1", "config": {"region": "us-east-1"}},
         )
         self.assertEqual(result["data"]["rows"], [[1]])

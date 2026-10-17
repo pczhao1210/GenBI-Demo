@@ -88,7 +88,59 @@ class ConfigManager:
         return config.get("mcp_servers", {})
     
     def save_mcp_config(self, config: Dict[str, Any]):
-        self._save_config("mcp_config.json", {"mcp_servers": config})
+        with FileLock(str(self.config_dir / "mcp_config.json.lock")):
+            existing = self._load_config("mcp_config.json")
+            self._save_config("mcp_config.json", {**existing, "mcp_servers": config})
+
+    def update_mcp_server(self, server_id, change):
+        self.load_mcp_config()
+        with FileLock(str(self.config_dir / "mcp_config.json.lock")):
+            existing = self._load_config("mcp_config.json")
+            servers = existing.setdefault("mcp_servers", {})
+            updated = change(servers.get(server_id))
+            if updated is None:
+                servers.pop(server_id, None)
+            else:
+                servers[server_id] = updated
+            self._save_config("mcp_config.json", existing)
+        return updated
+
+    def load_tools_config(self):
+        from utils.tool_catalog import default_tools_config, validate_tools_config
+        with FileLock(str(self.config_dir / "tools_config.json.lock")):
+            if not (self.config_dir / "tools_config.json").exists():
+                self._save_config("tools_config.json", default_tools_config())
+            return validate_tools_config(self._load_config("tools_config.json"))
+
+    def save_tools_config(self, config):
+        from utils.tool_catalog import validate_tools_config
+        validate_tools_config(config)
+        with FileLock(str(self.config_dir / "tools_config.json.lock")):
+            self._save_config("tools_config.json", config)
+
+    def update_tools_config(self, change):
+        from utils.tool_catalog import default_tools_config, validate_tools_config
+        with FileLock(str(self.config_dir / "tools_config.json.lock")):
+            config = (self._load_config("tools_config.json") if (self.config_dir / "tools_config.json").exists()
+                      else default_tools_config())
+            change(config)
+            validate_tools_config(config)
+            self._save_config("tools_config.json", config)
+        return config
+
+    def load_tool_discovery(self):
+        return self._load_config("tool_discovery.json")
+
+    def save_tool_discovery(self, server_id, snapshot):
+        with FileLock(str(self.config_dir / "tool_discovery.json.lock")):
+            existing = self._load_config("tool_discovery.json")
+            servers = existing.setdefault("servers", {})
+            servers.pop(server_id, None)
+            servers[server_id] = snapshot
+            while len(servers) > 64:
+                del servers[next(iter(servers))]
+            existing["schema_version"] = 1
+            self._save_config("tool_discovery.json", existing)
     
     def load_schema_config(self) -> Dict[str, Any]:
         config = self._load_config("schema_config.json")

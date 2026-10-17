@@ -16,7 +16,7 @@ navigation = st.navigation({
         st.Page("pages/schema_config.py", title=t("schema_config"), icon="📋"),
         st.Page("pages/semantics.py", title=t("semantics_title"), icon="📚"),
         st.Page("pages/llm_config.py", title=t("llm_config"), icon="🤖"),
-        st.Page("pages/mcp_management.py", title=t("mcp_management"), icon="🛠️"),
+        st.Page("pages/tools.py", title=t("tools_title"), icon="🛠️"),
     ],
     t("developer_nav"): [st.Page("pages/api_docs.py", title=t("api_docs"), icon="🔧")],
 })

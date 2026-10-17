@@ -5,7 +5,8 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.routers import chat, database, mcp, llm, runs, semantics
+from backend.routers import chat, database, mcp, llm, runs, semantics, tools
+from utils.resources import BusyError
 
 app = FastAPI(
     title="GenBI API",
@@ -29,6 +30,7 @@ app.include_router(mcp.router, prefix="/api/mcp", tags=["MCP"])
 app.include_router(llm.router, prefix="/api/llm", tags=["LLM"])
 app.include_router(runs.router, prefix="/api/runs", tags=["Runs"])
 app.include_router(semantics.router, prefix="/api/semantics", tags=["Semantics"])
+app.include_router(tools.router, prefix="/api/tools", tags=["Tools"])
 
 
 @app.exception_handler(ValueError)
@@ -39,6 +41,12 @@ async def invalid_request(request, exc):
 @app.exception_handler(RuntimeError)
 async def execution_failed(request, exc):
     return JSONResponse(status_code=502, content={"detail": str(exc), "success": False})
+
+
+@app.exception_handler(BusyError)
+async def busy(request, exc):
+    return JSONResponse(status_code=503, headers={"Retry-After": "1"},
+                        content={"detail": str(exc), "success": False, "run_id": getattr(exc, "run_id", None)})
 
 @app.get("/")
 async def root():

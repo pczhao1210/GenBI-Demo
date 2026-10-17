@@ -9,11 +9,13 @@ from utils.run_service import TERMINAL, get_run_service
 from utils.test_question_helper import get_test_question_input
 from utils.result_view import render_citations, render_table
 from utils.presentation import export_run
+from utils.run_view import RunViewCache
 
 st.set_page_config(page_title="Smart Chat", page_icon="💬", layout="wide")
 st.title(t("smart_chat"))
 config = ConfigManager()
 service = get_run_service()
+view_cache = st.session_state.setdefault("run_view_cache", RunViewCache())
 
 with st.sidebar:
     sources = config.load_datasources()
@@ -33,7 +35,18 @@ with st.sidebar:
                                     format_func=lambda key: sources[key]["name"])
     sessions = st.session_state.setdefault("run_sessions", {})
     session_id = sessions.setdefault(database, uuid4().hex)
-    history = service.store.history()
+    conversation_page = service.store.history_page(database=database, limit=20)
+    history = list(conversation_page["items"])
+    conversation_cursor = conversation_page["next_cursor"]
+    for _ in range(st.session_state.get(f"conversation_depth_{database}", 0)):
+        if conversation_cursor is None:
+            break
+        conversation_page = service.store.history_page(database=database, before=conversation_cursor, limit=20)
+        history.extend(conversation_page["items"])
+        conversation_cursor = conversation_page["next_cursor"]
+    if conversation_cursor is not None and st.button(t("load_older_runs"), key=f"older_conversations_{database}"):
+        st.session_state[f"conversation_depth_{database}"] = st.session_state.get(f"conversation_depth_{database}", 0) + 1
+        st.rerun()
     conversations = {run["session_id"]: run["question"][:40] for run in reversed(history)
                      if run["database"] == database}
     choices = list(dict.fromkeys([session_id, *conversations]))
@@ -52,10 +65,10 @@ def show_result(run, step_id, step):
         st.error(step["error"])
     if not step.get("artifact_id"):
         return
-    payload = service.store.artifact(run["run_id"], step["artifact_id"])
+    payload = view_cache.artifact(service.store, session_id, run["run_id"], step["artifact_id"])
     data = payload.get("data")
     if isinstance(data, dict) and "columns" in data and "rows" in data:
-        render_table(data, f"{run['run_id']}_{step_id}")
+        render_table(data, f"{run['run_id']}_{step_id}_{step['artifact_id']}", lazy_export=True)
     elif isinstance(data, str):
         st.markdown(data)
     elif data is not None and not any(key in data for key in ("sources", "chunks", "facts")):
@@ -67,13 +80,42 @@ def show_result(run, step_id, step):
             st.code(payload["sql"], language="sql")
 
 
-@st.fragment(run_every=1)
+polling = bool(service.store.history_page(
+    session_id, limit=100, statuses=["QUEUED", "RUNNING", "CANCELLING"])["items"])
+
+
+@st.fragment(run_every=1 if polling else None)
 def workspace():
-    for run in reversed(service.store.history(session_id)):
-        run_id = run["run_id"]
+    page = service.store.history_page(session_id, limit=20)
+    summaries = list(page["items"])
+    cursor = page["next_cursor"]
+    depth = st.session_state.get(f"history_depth_{session_id}", 0)
+    for _ in range(depth):
+        if cursor is None:
+            break
+        older = service.store.history_page(session_id, before=cursor, limit=20)
+        summaries.extend(older["items"])
+        cursor = older["next_cursor"]
+    if cursor is not None and st.button(t("load_older_runs"), key=f"older_{session_id}"):
+        st.session_state[f"history_depth_{session_id}"] = depth + 1
+        st.rerun()
+    active = service.store.history_page(session_id, limit=100, statuses=["QUEUED", "RUNNING", "CANCELLING"])["items"]
+    seen = {item["run_id"] for item in summaries}
+    summaries.extend(item for item in active if item["run_id"] not in seen)
+    summaries.sort(key=lambda item: item["created_at"], reverse=True)
+    latest = summaries[0]["run_id"] if summaries else None
+    for summary in reversed(summaries):
+        run_id = summary["run_id"]
         with st.chat_message("user"):
-            st.markdown(run["question"])
+            st.markdown(summary["question"])
         with st.chat_message("assistant"):
+            show = st.checkbox(t("show_run_details"), value=run_id == latest or summary["status"] in {
+                "QUEUED", "RUNNING", "CANCELLING"},
+                               key=f"details_{session_id}_{run_id}")
+            if not show:
+                st.caption(f"{summary['status']} · {summary['created_at']}")
+                continue
+            run = view_cache.snapshot(service.store, session_id, summary)
             st.write(f"{run['status']} · {run['phase']} · v{run['plan_version']}")
             if run.get("understanding"):
                 with st.expander(t("understood_question")):
@@ -140,12 +182,20 @@ def workspace():
                     new = service.retry(run_id, refresh=True)
                     service.start(new["run_id"])
                     st.rerun()
-                replay = service.store.replay(run_id)
-                exported, media, extension = export_run(replay)
-                st.download_button(t("download_run"), exported, file_name=f"{run_id}.{extension}",
-                                   mime=media, key=f"export_{run_id}")
-            with st.expander(t("run_events")):
-                st.json(service.store.events(run_id))
+                if st.button(t("prepare_export"), key=f"prepare_export_{run_id}"):
+                    replay = service.store.replay(run_id)
+                    st.session_state["prepared_export"] = (session_id, run_id, run["updated_at"], export_run(replay))
+                prepared = st.session_state.get("prepared_export")
+                if prepared and prepared[:3] == (session_id, run_id, run["updated_at"]):
+                    exported, media, extension = prepared[3]
+                    st.download_button(t("download_run"), exported, file_name=f"{run_id}.{extension}",
+                                       mime=media, key=f"export_{run_id}")
+            if st.checkbox(t("show_run_events"), key=f"events_{session_id}_{run_id}"):
+                with st.expander(t("run_events"), expanded=True):
+                    st.json(view_cache.read_events(service.store, session_id, run_id))
+    currently_active = bool(active)
+    if polling != currently_active:
+        st.rerun()
 
 
 try:

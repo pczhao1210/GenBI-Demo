@@ -6,7 +6,7 @@ from utils.i18n import t
 from utils.presentation import chart_spec, csv_export, numeric
 
 
-def render_table(data, key):
+def render_table(data, key, lazy_export=False):
     if data.get("truncated") or data.get("completeness") not in (None, "COMPLETE"):
         st.warning(t("result_truncated"))
     for warning in data.get("warnings", []):
@@ -39,8 +39,17 @@ def render_table(data, key):
         st.dataframe(df, width="stretch")
     with st.expander(t("result_scope")):
         st.json({name: value for name, value in data.items() if name not in ("rows", "columns")})
-    st.download_button(t("download_csv"), csv_export(data).encode("utf-8-sig"),
-                       file_name=f"{key}.csv", mime="text/csv", key=f"csv_{key}")
+    if lazy_export:
+        if st.button(t("prepare_table_export"), key=f"prepare_csv_{key}"):
+            st.session_state["prepared_table_export"] = (key, csv_export(data).encode("utf-8-sig"))
+        prepared = st.session_state.get("prepared_table_export")
+        if not prepared or prepared[0] != key:
+            return
+        content = prepared[1]
+    else:
+        content = csv_export(data).encode("utf-8-sig")
+    st.download_button(t("download_csv"), content, file_name=f"{key}.csv",
+                       mime="text/csv", key=f"csv_{key}")
 
 
 def render_citations(payload, key):

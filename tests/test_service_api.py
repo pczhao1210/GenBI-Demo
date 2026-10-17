@@ -1,4 +1,5 @@
 import json
+import threading
 from unittest.mock import patch
 
 import requests
@@ -9,6 +10,7 @@ from tests.helpers import ConfigTestCase, query_response
 from utils.bi_service import BIService, format_analysis_report, validate_plan
 from utils.run_service import RunService
 from utils.run_store import RunStore
+from utils.resources import RunQueue
 from tests.test_llm import response
 
 
@@ -62,6 +64,28 @@ class ServiceTests(ConfigTestCase):
         runs.execute(run_id)
         self.assertEqual(runs.store.get(run_id)["status"], "SUCCEEDED")
         self.assertIn("retail_west_51", self.llm.generate_sql.call_args.args[0])
+
+    def test_exhausted_tool_budget_allows_clarification_and_model_only_steps(self):
+        self.llm.generate_response.return_value = "Evidence summary"
+        runs = RunService(RunStore(self.config.config_dir / "budget.sqlite3"), self.config,
+                          lambda **kwargs: BIService(kwargs["config_manager"], self.mcp, self.llm))
+        run_id = runs.submit("explain", plan={"steps": [
+            {"step_id": 1, "step_type": "knowledge_retrieval", "query": "term"},
+            {"step_id": 2, "step_type": "user_input", "dependencies": [1]},
+            {"step_id": 3, "step_type": "llm_analysis", "dependencies": [1, 2]},
+            {"step_id": 4, "step_type": "knowledge_retrieval", "query": "more", "dependencies": [3]},
+        ]})["run_id"]
+        runs.store.update(run_id, lambda s: s["limits"].update(tool_calls=1))
+        runs.execute(run_id)
+        state = runs.store.get(run_id)
+        self.assertEqual(state["status"], "WAITING_INPUT")
+        runs.respond(run_id, state["request"]["request_id"], state["plan_version"], "confirmed")
+        runs.execute(run_id)
+        state = runs.store.get(run_id)
+        self.assertEqual(state["steps"]["3"]["status"], "SUCCEEDED")
+        self.assertEqual(state["steps"]["4"]["status"], "BLOCKED")
+        self.assertEqual(len(state["tool_records"]), 1)
+        self.llm.generate_response.assert_called_once()
 
     def test_sql_dependency_binding_excludes_unrelated_results(self):
         self.service.query = self.mcp.query
@@ -197,6 +221,28 @@ class APITests(ConfigTestCase):
             self.assertIn("updated_at", result.json()["sql"])
         self.assertEqual(self.client.post("/generate-sql", json={}).status_code, 404)
         self.mcp.call_mcp_server_with_config.assert_called_once()
+
+    def test_synchronous_plan_shares_run_admission_and_returns_busy(self):
+        queue = RunQueue(workers=1, queue_capacity=0)
+        self.addCleanup(queue.close)
+        entered, release = threading.Event(), threading.Event()
+        def occupy():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("Fixture timed out")
+        future = queue.submit("active-run", occupy)
+        try:
+            self.assertTrue(entered.wait(5))
+            with patch("utils.resources.run_queue", queue):
+                result = self.client.post("/api/chat/execute-plan", json={
+                    "question": "query", "plan": {"steps": [{"step_id": 1, "step_type": "sql_query"}]}})
+            self.assertEqual(result.status_code, 503, result.text)
+            self.assertEqual(result.headers["Retry-After"], "1")
+            self.llm.generate_sql.assert_not_called()
+            self.mcp.call_mcp_server_with_config.assert_not_called()
+        finally:
+            release.set()
+            future.result(5)
 
     def test_invalid_database_and_empty_connection_cannot_succeed(self):
         invalid = self.client.post("/api/database/test-connection", json={"type": "invalid", "config": {}})
