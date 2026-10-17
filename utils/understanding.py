@@ -31,7 +31,9 @@ def resolve_time(value, requested_at, timezone, business_day_start=0):
             "expression": expression, "end_exclusive": True}
 
 
-def understand(question, context, requested_at, source, ontology, call_model, available_results=None):
+def understand(question, context, requested_at, source, ontology, call_model, available_results=None,
+               datasource_ids=None):
+    active_ids = set(datasource_ids if datasource_ids is not None else [source.get("datasource_id")])
     prompt = (
         "Extract intent and NER slot PATCHES as JSON only. Do not answer or calculate. "
         'Shape: {"intent":"query|analysis|concept|reject","followup":false,'
@@ -45,6 +47,7 @@ def understand(question, context, requested_at, source, ontology, call_model, av
         f"\nCurrent question: {question}\nPrevious slots: {json.dumps(context, ensure_ascii=False)}"
         f"\nOntology: {json.dumps(ontology, ensure_ascii=False)}"
         f"\nAvailable result references: {json.dumps(available_results or [])}"
+        f"\nActive datasource IDs: {json.dumps(sorted(identifier for identifier in active_ids if identifier))}"
     )
     extracted = parse_json(call_model("fast", "generate_response", prompt, request_type="query"))
     if extracted.get("intent") not in ("query", "analysis", "concept", "reject"):
@@ -80,12 +83,16 @@ def understand(question, context, requested_at, source, ontology, call_model, av
             raise ValueError(f"Unknown {name} ID")
     metrics = slots.get("metrics", {}).get("value", [])
     dimensions = set(slots.get("dimensions", {}).get("value", []))
+    requires_plan = bool(active_ids) and source.get("datasource_id") not in active_ids
     for metric_id in metrics:
         metric = ontology["metrics"][metric_id]
         if not dimensions <= set(metric["allowed_dimensions"]):
             clarification = f"Dimensions are incompatible with metric {metric_id}; specify a compatible definition"
-        if extracted["intent"] != "concept" and source.get("datasource_id") not in metric["mappings"]:
-            clarification = f"Metric {metric_id} is explainable but not computable on this datasource"
+        if extracted["intent"] != "concept":
+            if not active_ids.intersection(metric["mappings"]):
+                clarification = f"Metric {metric_id} is explainable but not computable on the active datasources"
+            if source.get("datasource_id") not in metric["mappings"]:
+                requires_plan = True
     references = slots.get("result_reference", {}).get("value", [])
     if isinstance(references, list) and len(references) > 1:
         clarification = "Multiple result references; specify exactly one result"
@@ -96,4 +103,4 @@ def understand(question, context, requested_at, source, ontology, call_model, av
             clarification = "Multiple previous results; specify exactly one result reference"
     normalized = f"{question}\nConfirmed slot context: {json.dumps(slots, ensure_ascii=False)}"
     return {"intent": extracted["intent"], "slots": slots, "normalized_question": normalized,
-            "clarification": clarification, "requested_at": requested_at}
+            "clarification": clarification, "requested_at": requested_at, "requires_plan": requires_plan}

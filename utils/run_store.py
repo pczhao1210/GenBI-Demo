@@ -108,10 +108,13 @@ class RunStore:
         return json.loads(row[0])
 
     def history(self, session_id=None):
+        query, params = "SELECT state FROM runs", ()
+        if session_id is not None:
+            query += " WHERE json_extract(state, '$.session_id') = ?"
+            params = (session_id,)
         with self.connect() as db:
-            rows = db.execute("SELECT state FROM runs ORDER BY rowid DESC LIMIT 200").fetchall()
-        return [state for row in rows if (state := json.loads(row[0]))
-                and (session_id is None or state["session_id"] == session_id)]
+            rows = db.execute(query + " ORDER BY rowid DESC LIMIT 200", params).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def replay(self, run_id):
         state = self.get(run_id)

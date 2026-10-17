@@ -21,7 +21,7 @@ def frame(result):
         raise ValueError("Computation requires unique column names")
     if len(data["rows"]) > MAX_ROWS:
         raise ValueError("Input row budget exceeded; aggregate at the source")
-    result = pd.DataFrame(data["rows"], columns=data["columns"])
+    result = pd.DataFrame(data["rows"], columns=data["columns"], dtype=object)
     if result.memory_usage(deep=True).sum() > MAX_BYTES:
         raise ValueError("Input memory budget exceeded")
     return result, data
@@ -109,24 +109,36 @@ def join(inputs, requirements):
         raise ValueError("Join output memory budget exceeded before allocation")
     merged = left.merge(right, how=how, left_on=left_on, right_on=right_on,
                         validate=cardinality, suffixes=("_left", "_right"))
-    overlaps = set(left.columns) & set(right.columns) - set(left_on) - set(right_on)
-    repeated = []
+    if len(merged.columns) != len(set(merged.columns)):
+        raise ValueError("Join produces ambiguous column names; alias columns at the source")
+    shared_keys = {lc for lc, rc in zip(left_on, right_on) if lc == rc}
+    overlaps = (set(left.columns) & set(right.columns)) - shared_keys
+    left_names = {c: f"{c}_left" if c in overlaps else c for c in left.columns}
+    right_names = {c: f"{c}_right" if c in overlaps else c for c in right.columns}
+    repeated = set()
+    for source, names in ((lm, left_names), (rm, right_names)):
+        for column in source.get("repeated_measures", []):
+            if column not in names:
+                raise ValueError("Repeated measure metadata references an unavailable column")
+            repeated.add(names[column])
     if cardinality == "one_to_many":
-        repeated = [f"{c}_left" if c in overlaps else c for c in left.columns if c not in left_on]
+        repeated.update(left_names[c] for c in left.columns if c not in left_on)
     elif cardinality == "many_to_one":
-        repeated = [f"{c}_right" if c in overlaps else c for c in right.columns if c not in right_on]
+        repeated.update(right_names[c] for c in right.columns if c not in right_on)
     units = {f"{c}_left" if c in overlaps else c: v for c, v in lm["units"].items()}
     units.update({f"{c}_right" if c in overlaps else c: v for c, v in rm["units"].items()})
     metadata = {key: lm[key] for key in ("entity", "grain", "time_range", "timezone")}
-    metadata.update(units=units, repeated_measures=repeated,
-                    sources=[lm.get("datasource_id"), rm.get("datasource_id")],
-                    source_collected_at=[lm.get("collected_at"), rm.get("collected_at")])
+    metadata.update(units=units, repeated_measures=sorted(repeated),
+                    sources=[*lm.get("sources", [lm.get("datasource_id")]),
+                             *rm.get("sources", [rm.get("datasource_id")])],
+                    source_collected_at=[*lm.get("source_collected_at", [lm.get("collected_at")]),
+                                         *rm.get("source_collected_at", [rm.get("collected_at")])])
     diagnostics = {"left_rows": len(left), "right_rows": len(right), "output_rows": len(merged),
                    "cardinality": cardinality, "unmatched_left_ratio": unmatched_left,
                    "unmatched_right_ratio": unmatched_right,
                    "warnings": ["Independent source collection times are not a consistent cross-database snapshot."]}
     diagnostics["source_totals"] = [
-        {column: str(sum((decimal_value(value) for value in df[column] if value is not None), Decimal(0)))
+        {column: str(sum((decimal_value(value) for value in df[column] if not pd.isna(value)), Decimal(0)))
          for column in metadata["units"] if column in df}
         for df, metadata in ((left, lm), (right, rm))]
     diagnostics["output_totals"] = {
@@ -203,10 +215,12 @@ def _compute(requirements, results):
         records.append(record)
     names = [*group_by, *columns] if operation == "aggregate" else [
         *group_by, output_name, *([f"{output_name}_numerator", f"{output_name}_denominator"] if operation == "ratio" else [])]
-    result = pd.DataFrame(records, columns=list(dict.fromkeys(names)))
+    result = pd.DataFrame(records, columns=list(dict.fromkeys(names)), dtype=object)
     meta = {key: value for key, value in metadata.items()
             if key not in ("columns", "rows", "diagnostics", "logical_types", "repeated_measures")}
     meta["decimal_precision"] = 50
+    meta["repeated_measures"] = [column for column in metadata.get("repeated_measures", [])
+                                 if column in result.columns]
     return output(result, meta, {"operation": operation, "input_rows": len(metadata["rows"]),
                                 "excluded_null_rows": int(null_rows.sum()), "zero_denominators": int(zero_divisions),
                                 "warnings": ["Zero denominator produces NULL."] if zero_divisions else []})

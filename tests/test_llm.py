@@ -2,7 +2,11 @@ import copy
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
-from utils.llm_client import LLMClient, LLMError
+import httpx
+import openai
+import requests
+
+from utils.llm_client import LLMClient, LLMError, TransientLLMError
 
 
 def response(status=200, content="SELECT 1"):
@@ -80,6 +84,23 @@ class LLMTests(unittest.TestCase):
         with patch("utils.llm_client.requests.post", return_value=result):
             self.assertEqual(LLMClient(config).generate_response("question"), "answer")
         self.assertEqual(config, original)
+
+    def test_network_errors_are_retryable_but_tls_configuration_errors_are_not(self):
+        for error in (requests.Timeout("timeout"), requests.ConnectionError("offline")):
+            with self.subTest(error=error), patch("utils.llm_client.requests.post", side_effect=error):
+                with self.assertRaises(TransientLLMError):
+                    LLMClient(self.config()).generate_response("question")
+        with patch("utils.llm_client.requests.post", side_effect=requests.exceptions.SSLError("certificate")):
+            with self.assertRaises(LLMError) as error:
+                LLMClient(self.config()).generate_response("question")
+            self.assertNotIsInstance(error.exception, TransientLLMError)
+
+    @patch("utils.llm_client.openai.OpenAI")
+    def test_sdk_timeout_keeps_retryable_error_type(self, factory):
+        factory.return_value.__enter__.return_value.chat.completions.create.side_effect = openai.APITimeoutError(
+            request=httpx.Request("POST", "https://example.invalid"))
+        with self.assertRaises(TransientLLMError):
+            LLMClient(self.config("openai_sdk")).generate_response("question")
 
     @patch("utils.llm_client.openai.OpenAI")
     def test_sdk_dispatch_timeout_and_instance_isolation(self, factory):

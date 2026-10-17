@@ -30,8 +30,7 @@ with col2:
                     "args": [f"mcp_servers/{server_name}_server.py"],
                     "status": "inactive",
                     "description": server_info.get("description", ""),
-                    "capabilities": (config.get("capabilities", {}) if config.get("protocol") == "mcp"
-                                     else server_info.get("capabilities", [])),
+                    "capabilities": server_info.get("capabilities", []),
                     "version": server_info.get("version", "1.0.0"),
                     "methods": server_info.get("methods", [])
                 }
@@ -126,7 +125,8 @@ else:
                         # 更新配置中的信息
                         mcp_config[name].update({
                             "description": server_info.get("description", config.get("description", "")),
-                            "capabilities": server_info.get("capabilities", []),
+                            "capabilities": (config.get("capabilities", {}) if config.get("protocol") == "mcp"
+                                             else server_info.get("capabilities", [])),
                             "version": server_info.get("version", "1.0.0"),
                             "methods": server_info.get("methods", [])
                         })

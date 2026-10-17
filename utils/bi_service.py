@@ -6,7 +6,7 @@ from utils.config_manager import ConfigManager
 from utils.llm_client import LLMClient
 from utils.mcp_client import MCPClient, normalize_response
 from utils.sql_utils import clean_sql_response, validate_readonly_sql
-from utils.datasources import DatabaseAdapter
+from utils.datasources import DatabaseAdapter, resolve_source
 from utils.model_router import ModelRouter, ToolBudget
 from utils.semantics import KnowledgeIndex
 
@@ -257,7 +257,18 @@ class BIService:
     def execute_step(self, step: Dict, question: str, database: str, results: Dict) -> Dict:
         if step["step_type"] == "sql_query":
             requirement = json.dumps(step.get("query_requirements", {}), ensure_ascii=False)
-            result = self.query(f"{question}\nStep: {step.get('description', '')}\n{requirement}", database)
+            prompt = f"{question}\nStep: {step.get('description', '')}\n{requirement}"
+            refs = step.get("dependencies", []) + step.get("optional_dependencies", [])
+            if any(ref not in results for ref in refs):
+                raise ValueError("SQL step is missing declared dependency inputs")
+            if refs:
+                prompt += (
+                    "\nBind this step's requirements to the following dependency inputs by exact step ID. "
+                    "User clarification answers supply confirmed choices and filters. "
+                    "Do not ignore them or invent missing input values.\n"
+                    + json.dumps({ref: results[ref] for ref in refs}, ensure_ascii=False)
+                )
+            result = self.query(prompt, database)
             contract = step.get("result_contract", {})
             if contract:
                 allowed = {"entity", "grain", "time_range", "units"}
@@ -336,13 +347,22 @@ class BIService:
                     "data": self.router.call("reasoning", "generate_response", prompt, request_type="analysis")}
         raise ValueError(f"Step requires workflow input: {step['step_type']}")
 
-    def understand(self, question, database, context, requested_at, available_results=None):
+    def understand(self, question, database, context, requested_at, available_results=None, datasource_ids=None):
         from utils.understanding import understand
         sources = self.config.load_datasources()
-        matches = [s for s in sources.values() if s["engine"] == database]
-        source = sources.get(database) or (matches[0] if len(matches) == 1 else {"timezone": "UTC"})
-        return understand(question, context, requested_at, source, self.config.load_semantics(), self.router.call,
-                          available_results)
+        source, active_ids, binding_error = {"timezone": "UTC"}, [], None
+        try:
+            source = resolve_source(sources, database)
+            active_ids = [resolve_source(sources, identifier)["datasource_id"]
+                          for identifier in datasource_ids or [database]]
+        except ValueError as exc:
+            # Concept explanations do not require datasource binding.
+            binding_error = exc
+        result = understand(question, context, requested_at, source, self.config.load_semantics(), self.router.call,
+                            available_results, active_ids)
+        if binding_error is not None and result["intent"] not in ("concept", "reject"):
+            raise binding_error
+        return result
 
     def explain(self, question):
         knowledge = self.config.load_knowledge()

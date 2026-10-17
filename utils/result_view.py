@@ -22,7 +22,7 @@ def render_table(data, key):
     spec = chart_spec(data)
     mode = st.radio(t("result_view"), [t("table_view"), t("chart_view")], horizontal=True,
                     key=f"view_{key}") if spec else t("table_view")
-    df = pd.DataFrame(data["rows"], columns=data["columns"])
+    df = pd.DataFrame(data["rows"], columns=data["columns"], dtype=object)
     if mode == t("chart_view"):
         df[spec["y"]] = pd.to_numeric(df[spec["y"]], errors="raise")
         if spec["kind"] == "line":

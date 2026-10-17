@@ -122,6 +122,8 @@ class RunService:
         request = {"request_id": uuid4().hex, "request_kind": kind, "prompt": prompt,
                    "step_id": step_id, "plan_version": self.store.get(run_id)["plan_version"]}
         def change(s):
+            if s["status"] in TERMINAL:
+                return
             if s["status"] == "CANCELLING":
                 s.update(status="CANCELLED", owner=None)
                 return
@@ -153,7 +155,8 @@ class RunService:
                                                            "validity": "CURRENT"}
             s.update(status="QUEUED", request=None, confirmed=True)
         return self.store.update(run_id, change, "input_received", {"request_id": request_id},
-                                 artifact=(artifact, {"status": "success", "data": response}) if artifact else None)
+                                 artifact=(artifact, {"status": "success", "evidence_class": "user_input",
+                                                      "data": response}) if artifact else None)
 
     def revise(self, run_id, plan, request_id, plan_version):
         plan = validate_plan(plan)
@@ -168,11 +171,20 @@ class RunService:
 
     def cancel(self, run_id):
         def change(s):
-            if s["status"] in TERMINAL:
+            if s["status"] in TERMINAL | {"CANCELLING"}:
                 return
             s["status"] = "CANCELLING" if s["status"] == "RUNNING" else "CANCELLED"
             s["request"] = None
         return self.store.update(run_id, change, "cancel_requested")
+
+    def _cancel_at_checkpoint(self, run_id):
+        state = self.store.get(run_id)
+        if state["status"] == "CANCELLING":
+            def stop(s):
+                if s["status"] == "CANCELLING":
+                    s.update(status="CANCELLED", owner=None, request=None)
+            state = self.store.update(run_id, stop, "run_cancelled")
+        return state["status"] in TERMINAL
 
     def recover(self, run_id):
         def change(s):
@@ -202,9 +214,13 @@ class RunService:
             raise ValueError("Only terminal runs can be retried")
         current = snapshot_config(self.config)
         reuse, payloads = {}, {}
-        if not refresh and previous["source_version"] == fingerprint(current):
-            for key, step in previous["steps"].items():
-                if step["status"] == "SUCCEEDED" and step.get("validity") == "CURRENT":
+        if not refresh and previous["source_version"] == fingerprint(current) and previous["plan"]:
+            for definition in validate_plan(previous["plan"])["steps"]:
+                key = str(definition["step_id"])
+                step = previous["steps"].get(key, {})
+                dependencies = definition["dependencies"] + definition["optional_dependencies"]
+                if (step.get("status") == "SUCCEEDED" and step.get("validity") == "CURRENT"
+                        and all(str(ref) in reuse for ref in dependencies)):
                     result = self.store.artifact(run_id, step["artifact_id"])
                     reuse[key] = dict(step)
                     reuse[key].update(attempt_id=None, reused_from=run_id)
@@ -239,11 +255,14 @@ class RunService:
             return
         started = time.monotonic()
         try:
+            if self._cancel_at_checkpoint(run_id):
+                return
             state = self.store.get(run_id)
             snapshot = self.store.get(run_id, private=True)["snapshot"]
             service = self.service_factory(config_manager=FrozenConfig(snapshot))
             if isinstance(service, BIService):
                 service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
+                service.router.deadline = started + state["limits"]["active_seconds"] - state["active_seconds"]
                 service.tools.max_calls = state["limits"]["tool_calls"] - len(state.get("tool_records", []))
             if state["plan"] is None:
                 understanding = state.get("understanding")
@@ -252,10 +271,13 @@ class RunService:
                     if state.get("clarification_response"):
                         question += "\nUser clarification: " + state["clarification_response"]
                     understanding = service.understand(question, state["database"], state["context"],
-                                                        state["created_at"], state.get("available_results", []))
+                                                        state["created_at"], state.get("available_results", []),
+                                                        state["datasource_ids"])
                     self.store.update(run_id, lambda s: s.update(
                         understanding=understanding, normalized_question=understanding["normalized_question"],
                         phase="BIND"), "question_understood", understanding)
+                if self._cancel_at_checkpoint(run_id):
+                    return
                 if understanding.get("clarification"):
                     self._waiting(run_id, "understanding", understanding["clarification"])
                     return
@@ -265,13 +287,17 @@ class RunService:
                 if intent == "concept":
                     result = service.explain(state["question"])
                     artifact = self.store.put_artifact(run_id, result)
-                    self.store.update(run_id, lambda s: s.update(
-                        status="SUCCEEDED", phase="RENDER", owner=None,
-                        answer_sufficiency=result["answer_sufficiency"],
-                        steps={"knowledge": {"status": "SUCCEEDED", "artifact_id": artifact, "validity": "CURRENT"}}),
-                        "knowledge_answered")
+                    def answered(s):
+                        if s["status"] in TERMINAL:
+                            return
+                        cancelled = s["status"] == "CANCELLING"
+                        s.update(status="CANCELLED" if cancelled else "SUCCEEDED", phase="RENDER", owner=None,
+                                 answer_sufficiency=None if cancelled else result["answer_sufficiency"],
+                                 steps={"knowledge": {"status": "SUCCEEDED", "artifact_id": artifact,
+                                                      "validity": "CURRENT"}})
+                    self.store.update(run_id, answered, "knowledge_answered")
                     return
-                if intent == "analysis":
+                if intent == "analysis" or understanding.get("requires_plan"):
                     plan = service.analysis_plan(understanding["normalized_question"], state["database"],
                                                  datasource_ids=state["datasource_ids"])
                     self.store.update(run_id, lambda s: s.update(plan=plan, phase="PLAN"), "plan_created")
@@ -291,9 +317,11 @@ class RunService:
                 self._dag(run_id, service, started)
         except Exception as exc:
             logger.exception("Run %s failed", run_id)
-            self.store.update(run_id, lambda s: s.update(
-                status="CANCELLED" if s["status"] == "CANCELLING" else "FAILED",
-                error=str(exc), owner=None), "run_failed", {"error": str(exc)})
+            def failed(s):
+                if s["status"] not in TERMINAL:
+                    s.update(status="CANCELLED" if s["status"] == "CANCELLING" else "FAILED",
+                             error=str(exc), owner=None)
+            self.store.update(run_id, failed, "run_failed", {"error": str(exc)})
         finally:
             records = getattr(service.router, "records", []) if "service" in locals() else []
             if not isinstance(records, list):
@@ -324,7 +352,7 @@ class RunService:
         with ThreadPoolExecutor(max_workers=4) as pool:
             while True:
                 state = self.store.get(run_id)
-                cancelled = state["status"] == "CANCELLING"
+                cancelled = state["status"] in {"CANCELLING", "CANCELLED"}
                 exhausted = (state["active_seconds"] + time.monotonic() - started
                              > state["limits"]["active_seconds"])
                 for step in plan["steps"]:
@@ -396,7 +424,7 @@ class RunService:
                         result = {"status": "FAILED", "error": str(exc), "validity": "CURRENT"}
                         current = self.store.get(run_id)
                         if (isinstance(exc, (TimeoutError, ConnectionError))
-                                and current["status"] != "CANCELLING"
+                                and current["status"] == "RUNNING"
                                 and current["steps"][key]["attempt_count"] <= 2):
                             result["status"] = "PENDING"
                     def merge(s):
@@ -410,6 +438,8 @@ class RunService:
 
     def _finish(self, run_id, total):
         def finish(s):
+            if s["status"] in TERMINAL:
+                return
             successes = sum(item["status"] == "SUCCEEDED" for item in s["steps"].values())
             required = [step for step in s["plan"]["steps"] if step.get("required", True)]
             required_successes = sum(s["steps"].get(str(step["step_id"]), {}).get("status") == "SUCCEEDED"
@@ -430,7 +460,7 @@ class RunService:
             state = self.store.get(run_id)
             if state["status"] == "WAITING_INPUT":
                 return
-            if state["status"] == "CANCELLING":
+            if state["status"] in TERMINAL | {"CANCELLING"}:
                 self._finish(run_id, len(state["plan"]["steps"]))
                 return
             results = {int(key): self.store.artifact(run_id, step["artifact_id"])
@@ -529,6 +559,7 @@ class RunService:
         started = time.monotonic()
         if isinstance(service, BIService):
             service.router.max_calls = state["limits"]["model_calls"] - len(state.get("model_calls", []))
+            service.router.deadline = started + state["limits"]["active_seconds"] - state["active_seconds"]
         try:
             plan = service.analysis_plan(state.get("normalized_question", state["question"]), state["database"],
                                          state["plan"], feedback, state["datasource_ids"])

@@ -1,7 +1,7 @@
 import threading
 import time
 
-from utils.llm_client import LLMClient
+from utils.llm_client import LLMClient, TransientLLMError
 
 
 class ModelRouter:
@@ -10,9 +10,18 @@ class ModelRouter:
         self.injected = injected
         self.records = []
         self.max_calls = max_calls
+        self.deadline = None
         self._lock = threading.Lock()
 
     def call(self, role, method, *args, **kwargs):
+        for attempt in range(1, 4):
+            try:
+                return self._call_once(role, method, attempt, *args, **kwargs)
+            except TransientLLMError:
+                if attempt == 3:
+                    raise
+
+    def _call_once(self, role, method, attempt, *args, **kwargs):
         if role not in ("fast", "sql", "reasoning"):
             raise ValueError(f"Unknown model role: {role}")
         roles = self.config.load_model_roles()
@@ -23,10 +32,12 @@ class ModelRouter:
         section = selected.get("openai" if provider == "openai_sdk" else provider, {})
         record = {"role": role, "provider": provider,
                   "model": section.get("model", section.get("deployment_name")),
-                  "prompt_version": "1", "status": "RUNNING", "token_usage": None}
+                  "prompt_version": "1", "status": "RUNNING", "token_usage": None, "attempt": attempt}
         with self._lock:
             if len(self.records) >= self.max_calls:
                 raise RuntimeError("Model call budget exhausted")
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                raise RuntimeError("Model active time budget exhausted")
             self.records.append(record)
         started = time.monotonic()
         try:

@@ -116,6 +116,7 @@ curl -X POST http://localhost:8000/api/chat/query \
 - 工具调用有进程超时；脚本探测成功只代表能响应，不代表数据库连接成功。
 - 聊天通过持久任务服务执行；运行、事件、输入快照和结果保存在 `data/runs.sqlite3`。
   终态重试创建关联运行，成功且配置未变的步骤可复用；刷新不复用。回放不调用外部服务。
+  复用还要求必要和可选依赖均保持有效；重试上游时，其下游结果一并失效。
   中断恢复需确认原执行进程已退出；无法确认完成的在途调用可能重执行，不承诺 exactly-once。
   取消为协作式：立即停止后续调度，在途调用结束后才进入 `CANCELLED`。
 - 当前工具是内置换行 JSON RPC 兼容层，**不是完整 MCP 2025 协议实现**，
@@ -173,6 +174,8 @@ MSSQL 需在宿主机安装 **unixODBC 和 Microsoft ODBC Driver 18 for SQL Serv
 按操作系统使用 Microsoft 官方安装说明：https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server
 连接失败、驱动缺失与 SQL 错误均显式报告。统一结果记录源 ID、采集时间、类型、时区、
 完整性与警告；Decimal 保留字符串精度，日期为 ISO，NULL 为 null。
+UUID、TIME 和 INTERVAL 结果分别保留为 UUID 字符串、ISO 时间和时长字符串，
+数组中的原生值也会递归规范化，保证查询结果可以持久化和回放。
 
 验证边界：离线测试覆盖四类方言、多连接隔离、迁移、预览及结果类型；尚未使用真实
 PostgreSQL/MSSQL 服务验收连接、元数据与查询，也未在本机安装 Microsoft 系统 ODBC 驱动。
@@ -190,6 +193,8 @@ PostgreSQL/MSSQL 服务验收连接、元数据与查询，也未在本机安装
 模型页可覆盖 `fast` / `sql` / `reasoning` 的完整连接配置；未覆盖角色共用主模型。
 调用记录包含角色、实际模型、耗时、状态与调用次数；当前客户端未提供 token 计数时记为 null。
 模型错误显式失败，不自动降级。
+模型网络超时和连接中断在角色路由层最多重试两次，每次尝试单独记录并计入模型预算；
+达到活动时长预算后不再发起下一次尝试，步骤层不叠加模型网络重试。
 
 `GET/PUT /api/semantics/ontology`、`GET/PUT /api/semantics/knowledge` 管理内容，
 `GET /api/semantics/search?q=...&scope=...` 可试验检索。真实 NER/LLM 语义准确率仍需联调评测，
@@ -216,6 +221,8 @@ SQL 字段/语法错误最多修正 2 次，第二次升级 reasoning；合法�
 
 聊天侧栏选择活动数据源集合，任务 API 接收 `datasource_ids`。每个 SQL 步骤独立绑定
 `datasource_id`，运行冻结源配置与 Schema；计划引用集合之外的源会明确失败。
+指标可计算性按活动数据源集合检查；需要主数据源之外指标的查询先生成并确认计划，
+不强行在主数据源执行。用户澄清回答作为显式依赖输入传入 SQL 生成。
 步骤类型新增 `compute` / `data_align` / `knowledge_retrieval`，旧计划与同步 API 仍可用。
 
 跨源优先源端聚合，本地用 Pandas 执行有限计算，不支持任意联邦 SQL。
@@ -226,6 +233,8 @@ ratio、difference。Join 必须明确键与基数，双方需声明相同实体
 多对多拒绝执行，一对多重复度量不允许直接汇总。比率先汇总分子分母再除，NULL 默认拒绝，
 零分母保留 NULL。输入/输出上限为 10,000 行、16 MiB，关联前估算膨胀；不静默截断。
 Decimal 计算精度显式为 50 位；保留各源采集时间，不假设跨库一致性快照。
+本地计算和表格展示不会因 NULL 将整数提前转为浮点数；
+重复度量标记随连续关联及列重命名传递，不能通过追加一次 Join 绕过重复计数检查。
 
 外部步骤可以先搜索再抓正文，也可直接获取 HTTP(S) 文档/结构化 API，或按能力调用
 标准 MCP 工具。搜索摘要仅为 discovery，不允许当作结论证据。
@@ -233,6 +242,9 @@ Decimal 计算精度显式为 50 位；保留各源采集时间，不假设跨�
 文本抽取校验原文位置及各值，结构化 API 可用 `field_mapping` 声明 records_path、
 value/unit/region/observed_at/variable 字段，保留 JSON Pointer。时间、地区、单位不匹配的
 事实排除并记录警告；无匹配事实为证据不足。发布时点与观测时点分别保留，未知不补造。
+结论中的外部数值使用 `{"step_id": 1, "fact_index": 0, "value": "12.5"}` 绑定到
+该步骤持久结果的 `data.facts`；代码核对值和类型，并附上实际来源 URL 与正文位置或 JSON Pointer。
+原有表格数值的 `step_id` / `column` / `row` 绑定保持兼容。
 实际模型/工具调用均计入独立预算，外部抓取有超时和 2 MiB 文档预算。
 
 本地标准 MCP stdio fixture 已验证真实协议协商、发现、调用与错误，Streamable HTTP 也有

@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from tests.helpers import ConfigTestCase
 from utils.bi_service import BIService
 from utils.model_router import ModelRouter, ToolBudget
+from utils.llm_client import TransientLLMError
 from utils.semantics import KnowledgeIndex
 from utils.understanding import resolve_time, understand
 
@@ -94,6 +95,27 @@ class SemanticTests(ConfigTestCase):
             budget.call("database.query", tool)
         self.assertEqual(tool.call_count, 64)
 
+    def test_fast_role_transient_retries_count_against_model_budget(self):
+        router = ModelRouter(self.config, self.llm, max_calls=2)
+        self.llm.generate_response.side_effect = TransientLLMError("temporary")
+        with self.assertRaisesRegex(RuntimeError, "budget exhausted"):
+            router.call("fast", "generate_response", "understand question")
+        self.assertEqual(self.llm.generate_response.call_count, 2)
+        self.assertEqual([record["attempt"] for record in router.records], [1, 2])
+        self.assertTrue(all(record["status"] == "FAILED" for record in router.records))
+
+    def test_model_retry_does_not_start_after_active_time_budget(self):
+        router = ModelRouter(self.config, self.llm)
+        router.deadline = 1
+        with patch("utils.model_router.time.monotonic", return_value=0) as clock:
+            def timeout(*args, **kwargs):
+                clock.return_value = 2
+                raise TransientLLMError("timeout")
+            self.llm.generate_response.side_effect = timeout
+            with self.assertRaisesRegex(RuntimeError, "active time budget exhausted"):
+                router.call("fast", "generate_response", "understand")
+        self.assertEqual(self.llm.generate_response.call_count, 1)
+
     def test_concept_explanation_does_not_need_database(self):
         self.config.save_knowledge({"documents": [{
             "id": "ratio", "title": "Conversion", "text": "Conversion is orders divided by visits",
@@ -103,3 +125,27 @@ class SemanticTests(ConfigTestCase):
         answer = service.explain("Conversion")
         self.assertEqual(answer["citations"][0]["chunk_id"], "ratio:0")
         self.mcp.assert_not_called()
+
+    def test_understanding_defers_source_binding_only_for_non_database_intents(self):
+        service = BIService(self.config, self.mcp, self.llm)
+        for intent in ("concept", "query"):
+            self.llm.generate_response.return_value = json.dumps({
+                "intent": intent, "followup": False, "slots": {}, "clarification": None,
+            })
+            if intent == "concept":
+                result = service.understand("definition", "unconfigured", {}, "2026-10-15T00:00:00Z")
+                self.assertIsNone(result["clarification"])
+            else:
+                with self.assertRaisesRegex(ValueError, "Unsupported database"):
+                    service.understand("query", "unconfigured", {}, "2026-10-15T00:00:00Z")
+        self.mcp.call_mcp_server_with_config.assert_not_called()
+
+    def test_query_with_inactive_primary_source_requires_an_explicit_plan(self):
+        model = Mock(return_value=json.dumps({
+            "intent": "query", "followup": False, "slots": {}, "clarification": None,
+        }))
+        result = understand("show rows", {}, "2026-10-15T00:00:00Z",
+                            {"datasource_id": "primary", "timezone": "UTC"}, {}, model,
+                            datasource_ids=["secondary"])
+        self.assertIsNone(result["clarification"])
+        self.assertTrue(result["requires_plan"])

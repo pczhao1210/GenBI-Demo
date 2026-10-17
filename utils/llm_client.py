@@ -11,6 +11,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class TransientLLMError(LLMError):
+    pass
+
+
 def nested_set(data: Dict, path: str, value: Any) -> None:
     keys = path.split(".")
     for key in keys[:-1]:
@@ -139,6 +143,8 @@ class LLMClient:
                     response = client.chat.completions.create(**data)
                 message = response.choices[0].message.model_dump(exclude_none=True)
                 return self._validate_message(message)
+            except openai.APIConnectionError as exc:
+                raise TransientLLMError("OpenAI SDK connection failed or timed out") from exc
             except openai.OpenAIError as exc:
                 raise LLMError("OpenAI SDK request failed; check endpoint and credentials") from exc
 
@@ -206,11 +212,15 @@ class LLMClient:
         for attempt in range(3):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise LLMError("LLM request timed out")
+                raise TransientLLMError("LLM request timed out")
             try:
                 response = requests.post(url, headers=headers, json=data, timeout=remaining)
+            except requests.exceptions.SSLError as exc:
+                raise LLMError("LLM TLS connection failed; check endpoint and certificates") from exc
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                raise TransientLLMError("LLM connection failed or timed out") from exc
             except requests.RequestException as exc:
-                raise LLMError("LLM connection failed or timed out") from exc
+                raise LLMError("LLM request failed") from exc
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt < 2:
                     delay = min(2 ** attempt, max(0, deadline - time.monotonic()))

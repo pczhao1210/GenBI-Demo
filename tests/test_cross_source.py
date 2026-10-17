@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from tests.helpers import ConfigTestCase
+from utils.analysis import render_conclusion, validate_conclusion
 from utils.computation import compute
 from utils.config_manager import PROJECT_ROOT
 from utils.external_evidence import align_facts, extract_evidence, extract_structured
@@ -77,6 +78,44 @@ class ComputationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicated"):
             compute({"operation": "aggregate", "inputs": [3], "columns": ["amount"]}, {3: joined})
 
+    def test_chained_join_preserves_repeated_measures_on_both_sides_and_after_renaming(self):
+        first = compute({"operation": "join", "inputs": [1, 2], "left_on": ["shop"], "right_on": ["shop"],
+                         "cardinality": "one_to_many"}, {
+                             1: table(["shop", "amount"], [["a", "10"]], source="shops", units={"amount": "CNY"}),
+                             2: table(["shop", "event"], [["a", "e1"], ["a", "e2"]], source="events"),
+                         })
+        details = table(["event", "amount"], [["e1", "1"], ["e2", "2"]],
+                        source="details", units={"amount": "CNY"})
+        for reversed_inputs in (False, True):
+            with self.subTest(reversed_inputs=reversed_inputs):
+                second = compute({"operation": "join", "inputs": [3, 4], "left_on": ["event"],
+                                  "right_on": ["event"], "cardinality": "one_to_one"},
+                                 {3: details if reversed_inputs else first,
+                                  4: first if reversed_inputs else details})
+                duplicated = "amount_right" if reversed_inputs else "amount_left"
+                clean = "amount_left" if reversed_inputs else "amount_right"
+                self.assertIn(duplicated, second["data"]["repeated_measures"])
+                self.assertEqual(set(second["data"]["sources"]), {"shops", "events", "details"})
+                with self.assertRaisesRegex(ValueError, "duplicated"):
+                    compute({"operation": "aggregate", "inputs": [5], "columns": [duplicated]}, {5: second})
+                valid = compute({"operation": "aggregate", "inputs": [5], "columns": [clean]}, {5: second})
+                self.assertEqual(valid["data"]["rows"], [["3"]])
+
+    def test_big_integers_survive_nulls_outer_joins_and_aggregation(self):
+        value = 9007199254740993
+        joined = compute({"operation": "join", "inputs": [1, 2], "left_on": ["id"], "right_on": ["id"],
+                          "cardinality": "one_to_one", "how": "outer", "max_unmatched_ratio": 1}, {
+                              1: table(["id", "amount"], [["a", value]], units={"amount": "count"}),
+                              2: table(["id"], [["b"]]),
+                          })
+        for source in (table(["amount"], [[value], [None]]), joined):
+            with self.subTest(source=source):
+                result = compute({"operation": "aggregate", "inputs": [1], "columns": ["amount"],
+                                  "null_policy": "exclude"}, {1: source})
+                self.assertEqual(result["data"]["rows"], [[str(value)]])
+                self.assertEqual(result["data"]["diagnostics"]["excluded_null_rows"], 1)
+        self.assertEqual(joined["data"]["diagnostics"]["output_totals"]["amount"], str(value))
+
     def test_null_and_zero_denominators_preserve_meaning(self):
         with self.assertRaisesRegex(ValueError, "NULL"):
             compute({"operation": "ratio", "inputs": [1], "numerator": "n", "denominator": "d"},
@@ -113,6 +152,33 @@ class ExternalTests(unittest.TestCase):
         result = extract_structured(document, need, mapping)
         self.assertEqual(result["facts"][0]["source_position"], "/records/0")
         self.assertEqual(result["facts"][0]["value"], "12.5")
+        evidence = {1: {"status": "success", "evidence_class": "observation", "data": result}}
+        conclusion = {
+            "answer_sufficiency": "QUALIFIED", "premise": "UNKNOWN", "hypotheses": [], "gaps": [],
+            "next_plan": None, "claims": [{"text": "Observed price is 12.5", "evidence": [1], "facts": [
+                {"step_id": 1, "fact_index": 0, "value": "12.5", "source_url": "invented",
+                 "source_position": "/invented"},
+            ]}],
+        }
+        verified = validate_conclusion(conclusion, evidence)
+        report = render_conclusion(verified, Mock(return_value='{"claim_order":[0],"style":"bullets"}'))
+        self.assertIn("12.5", report)
+        self.assertIn("https://example.invalid/api", report)
+        self.assertIn("/records/0", report)
+        self.assertNotIn("invented", report)
+        for change in ({"value": 12.5}, {"value": "999"}, {"fact_index": 1}, {"fact_index": -1},
+                       {"fact_index": True}, {"step_id": 2}, {"row": 0, "column": "value"}):
+            with self.subTest(change=change):
+                bad = deepcopy(conclusion)
+                bad["claims"][0]["facts"][0].update(change)
+                with self.assertRaises(ValueError):
+                    validate_conclusion(bad, evidence)
+        with self.assertRaisesRegex(ValueError, "discovery"):
+            validate_conclusion(conclusion, {1: {**evidence[1], "evidence_class": "discovery"}})
+        escaped = extract_structured(
+            {**document, "text": json.dumps({"records/v1~": payload["records"]})},
+            need, {**mapping, "records_path": ["records/v1~"]})
+        self.assertEqual(escaped["facts"][0]["source_position"], "/records~1v1~0/0")
 
     def test_evidence_tracks_position_and_excludes_wrong_time_region(self):
         text = "2026-10-01T12:00:00+00:00 Shanghai 12.5 CNY"
@@ -126,6 +192,16 @@ class ExternalTests(unittest.TestCase):
         self.assertEqual(accepted[0]["source_url"], document["url"])
         self.assertEqual(accepted[0]["excerpt"], text)
         self.assertEqual(warnings, [])
+        conclusion = {
+            "answer_sufficiency": "QUALIFIED", "premise": "UNKNOWN", "hypotheses": [], "gaps": [],
+            "next_plan": None, "claims": [{"text": "Observed price is 12.5", "evidence": [1], "facts": [
+                {"step_id": 1, "fact_index": 0, "value": "12.5"},
+            ]}],
+        }
+        verified = validate_conclusion(conclusion, {1: {
+            "status": "success", "evidence_class": "observation", "data": {"facts": accepted},
+        }})
+        self.assertEqual(verified["claims"][0]["facts"][0]["source_position"], [0, len(text)])
         accepted, warnings = align_facts(facts, {**need, "region": "Beijing"}, document)
         self.assertEqual(accepted, [])
         self.assertTrue(warnings)
@@ -186,6 +262,42 @@ class StandardMCPTests(ConfigTestCase):
 
 
 class CrossSourceRunTests(ConfigTestCase):
+    def test_metrics_on_active_secondary_source_reach_plan_confirmation(self):
+        self.config.load_datasources()
+        self.config.save_semantics({"metrics": {
+            metric: {"description": metric, "formula": "COUNT(*)", "aggregation": "sum",
+                     "time_field": "updated_at", "unit": "count", "allowed_dimensions": [],
+                     "mappings": {source: {"table": name, "columns": ["updated_at"]}}}
+            for metric, source, name in (("sales", "legacy-mysql", "mysql_orders"),
+                                         ("traffic", "legacy-athena", "athena_orders"))
+        }})
+        plan = {"steps": [
+            {"step_id": 1, "step_type": "sql_query", "datasource_id": "legacy-mysql"},
+            {"step_id": 2, "step_type": "sql_query", "datasource_id": "legacy-athena"},
+        ]}
+        for intent, active_ids in (("analysis", ["legacy-mysql", "legacy-athena"]),
+                                   ("query", ["legacy-mysql", "legacy-athena"]),
+                                   ("analysis", ["legacy-mysql"])):
+            with self.subTest(intent=intent, active_ids=active_ids):
+                self.llm.generate_response.side_effect = [
+                    json.dumps({"intent": intent, "followup": False, "clarification": None,
+                                "slots": {"metrics": {"value": ["sales", "traffic"], "span": [0, 17]}}}),
+                    json.dumps(plan),
+                ]
+                runs = RunService(RunStore(self.config.config_dir / "understanding.sqlite3"), self.config,
+                                  lambda **kw: BIService(kw["config_manager"], self.mcp, self.llm))
+                run_id = runs.submit("sales and traffic comparison", database="legacy-mysql",
+                                     datasource_ids=active_ids)["run_id"]
+                runs.execute(run_id)
+                state = runs.store.get(run_id)
+                self.assertEqual(state["status"], "WAITING_INPUT", state)
+                if len(active_ids) == 2:
+                    self.assertEqual(state["request"]["request_kind"], "plan_confirmation")
+                    self.assertEqual({step["datasource_id"] for step in state["plan"]["steps"]}, set(active_ids))
+                else:
+                    self.assertIn("not computable", state["request"]["prompt"])
+                self.mcp.call_mcp_server_with_config.assert_not_called()
+
     def test_full_run_binds_each_engine_and_calculates_known_ratio(self):
         for identifier, engine in (("pg", "postgresql"), ("ms", "mssql")):
             self.config.save_datasource({

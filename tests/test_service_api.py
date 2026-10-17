@@ -1,11 +1,15 @@
 import json
 from unittest.mock import patch
 
+import requests
 from fastapi.testclient import TestClient
 
 from backend.main import app
 from tests.helpers import ConfigTestCase, query_response
 from utils.bi_service import BIService, format_analysis_report, validate_plan
+from utils.run_service import RunService
+from utils.run_store import RunStore
+from tests.test_llm import response
 
 
 def plan():
@@ -42,6 +46,53 @@ class ServiceTests(ConfigTestCase):
         prompt = self.llm.generate_response.call_args.args[0]
         self.assertIn("EXPECTED_SECOND_DATA", prompt)
         self.assertNotIn("WRONG_FIRST_DATA", prompt)
+
+    def test_clarification_reaches_sql_prompt_through_persisted_workflow(self):
+        self.llm.generate_sql.return_value = "SELECT updated_at FROM mysql_orders"
+        self.mcp.call_mcp_server_with_config.return_value = query_response()
+        runs = RunService(RunStore(self.config.config_dir / "runs.sqlite3"), self.config,
+                          lambda **kwargs: self.service)
+        run_id = runs.submit("retrieve chosen segment", plan={"steps": [
+            {"step_id": 1, "step_type": "user_input", "description": "Which segment?"},
+            {"step_id": 2, "step_type": "sql_query", "dependencies": [1]},
+        ]})["run_id"]
+        runs.execute(run_id)
+        state = runs.store.get(run_id)
+        runs.respond(run_id, state["request"]["request_id"], state["plan_version"], "retail_west_51")
+        runs.execute(run_id)
+        self.assertEqual(runs.store.get(run_id)["status"], "SUCCEEDED")
+        self.assertIn("retail_west_51", self.llm.generate_sql.call_args.args[0])
+
+    def test_sql_dependency_binding_excludes_unrelated_results(self):
+        self.service.query = self.mcp.query
+        self.service.query.return_value = {"data": {}}
+        self.service.execute_step({"step_type": "sql_query", "dependencies": [2]}, "query", "mysql", {
+            1: {"data": "UNRELATED"}, 2: {"data": "CONFIRMED_FILTER"},
+        })
+        prompt = self.service.query.call_args.args[0]
+        self.assertIn("CONFIRMED_FILTER", prompt)
+        self.assertNotIn("UNRELATED", prompt)
+
+    def test_real_network_failures_retry_within_model_budget_not_nested_step_retries(self):
+        self.mcp.call_mcp_server_with_config.return_value = query_response()
+        for failures, expected_calls, expected_status in (
+            ([requests.Timeout("offline"), response()], 2, "SUCCEEDED"),
+            ([requests.ConnectionError("offline")] * 3, 3, "FAILED"),
+            ([response(401)], 1, "FAILED"),
+        ):
+            with self.subTest(status=expected_status, calls=expected_calls):
+                runs = RunService(RunStore(self.config.config_dir / "network.sqlite3"), self.config,
+                                  lambda **kwargs: BIService(kwargs["config_manager"], self.mcp))
+                run_id = runs.submit("query", plan={"steps": [
+                    {"step_id": 1, "step_type": "sql_query"},
+                ]})["run_id"]
+                with patch("utils.llm_client.requests.post", side_effect=failures) as post:
+                    runs.execute(run_id)
+                state = runs.store.get(run_id)
+                self.assertEqual(state["status"], expected_status, state)
+                self.assertEqual(post.call_count, expected_calls)
+                self.assertEqual(len(state["model_calls"]), expected_calls)
+                self.assertEqual(state["steps"]["1"]["attempt_count"], 1)
 
     def test_failed_dependencies_skip_analysis_and_report_partial(self):
         self.service.query = self.mcp.query

@@ -48,6 +48,19 @@ class RunTests(unittest.TestCase):
         self.assertEqual(restored.events(run_id, events[-1]["seq"]), [])
         self.assertNotIn("snapshot", state)
 
+    def test_session_history_filters_before_limit_and_retains_followup_context(self):
+        run_id = self.submit(session_id="older-session")
+        understanding = {"slots": {"filters": {"value": {"region": "west"}, "origin": "current"}}}
+        self.store.update(run_id, lambda s: s.update(status="SUCCEEDED", understanding=understanding))
+        for index in range(205):
+            self.store.create({"run_id": f"other-{index}", "session_id": "other"},
+                              {"submission_input": {}}, f"other-{index}")
+        self.assertEqual(len(self.store.history()), 200)
+        self.assertEqual([run["run_id"] for run in self.store.history("older-session")], [run_id])
+        self.assertEqual(self.store.history("unknown"), [])
+        followup = self.service.submit("yesterday", session_id="older-session", plan=dag())
+        self.assertEqual(followup["context"], understanding["slots"])
+
     def test_failed_dependencies_partial_retry_reuses_success(self):
         def execute(step, *args):
             if step["step_id"] == 1:
@@ -72,6 +85,33 @@ class RunTests(unittest.TestCase):
         run_id = self.submit()
         self.service.execute(run_id)
         self.assertEqual(self.store.get(run_id)["status"], "FAILED")
+
+    def test_retry_invalidates_consumers_of_retried_optional_inputs(self):
+        unavailable = True
+        def execute(step, question, database, inputs):
+            if step["step_id"] == 1 and unavailable:
+                raise RuntimeError("Source unavailable")
+            return {"status": "success", "data": inputs}
+        self.bi.execute_step.side_effect = execute
+        run_id = self.submit({"steps": [
+            {"step_id": 1, "step_type": "external_data"},
+            {"step_id": 2, "step_type": "llm_analysis", "optional_dependencies": [1],
+             "allow_missing_inputs": True, "analysis_requirements": {"input_data": [1]}},
+            {"step_id": 3, "step_type": "llm_analysis", "dependencies": [2]},
+            {"step_id": 4, "step_type": "sql_query"},
+        ]})
+        self.service.execute(run_id)
+        self.assertEqual(self.store.get(run_id)["status"], "PARTIAL")
+        unavailable = False
+        retry = self.service.retry(run_id)
+        self.assertEqual(set(retry["steps"]), {"4"})
+        self.bi.execute_step.reset_mock()
+        self.service.execute(retry["run_id"])
+        self.assertEqual([call.args[0]["step_id"] for call in self.bi.execute_step.call_args_list], [1, 2, 3])
+        state = self.store.get(retry["run_id"])
+        self.assertEqual(state["status"], "SUCCEEDED")
+        result = self.store.artifact(retry["run_id"], state["steps"]["2"]["artifact_id"])
+        self.assertEqual(result["data"]["1"]["status"], "success")
 
     def test_optional_branch_failure_does_not_fail_required_delivery(self):
         def execute(step, *args):
@@ -122,12 +162,60 @@ class RunTests(unittest.TestCase):
         try:
             self.assertTrue(entered.wait(5))
             self.assertEqual(self.service.cancel(run_id)["status"], "CANCELLING")
+            self.assertEqual(self.service.cancel(run_id)["status"], "CANCELLING")
         finally:
             release.set()
             worker.join(5)
         self.assertFalse(worker.is_alive())
         self.assertEqual(self.store.get(run_id)["status"], "CANCELLED")
         self.assertEqual(self.bi.execute_step.call_count, 1)
+
+    def test_cancel_during_concept_answer_cannot_be_overwritten_by_success(self):
+        entered, release = threading.Event(), threading.Event()
+        self.bi.understand.return_value = {
+            "intent": "concept", "slots": {}, "normalized_question": "concept", "clarification": None,
+        }
+        def explain(*args):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return {"status": "success", "data": "definition", "answer_sufficiency": "QUALIFIED"}
+        self.bi.explain.side_effect = explain
+        run_id = self.service.submit("concept")["run_id"]
+        worker = threading.Thread(target=self.service.execute, args=(run_id,))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(self.service.cancel(run_id)["status"], "CANCELLING")
+        finally:
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        state = self.store.get(run_id)
+        self.assertEqual(state["status"], "CANCELLED")
+        self.assertIsNone(state["answer_sufficiency"])
+        self.service._finish(run_id, 0)
+        self.assertEqual(self.store.get(run_id)["status"], "CANCELLED")
+
+    def test_cancel_during_understanding_stops_before_next_model_stage(self):
+        entered, release = threading.Event(), threading.Event()
+        def understand(*args):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return {"intent": "analysis", "slots": {}, "normalized_question": "why", "clarification": None}
+        self.bi.understand.side_effect = understand
+        run_id = self.service.submit("why")["run_id"]
+        worker = threading.Thread(target=self.service.execute, args=(run_id,))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(self.service.cancel(run_id)["status"], "CANCELLING")
+        finally:
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.store.get(run_id)["status"], "CANCELLED")
+        self.bi.analysis_plan.assert_not_called()
+        self.bi.execute_step.assert_not_called()
 
     def test_parallel_branches_are_merged(self):
         barrier = threading.Barrier(2)

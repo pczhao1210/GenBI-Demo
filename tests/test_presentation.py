@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 import tests.test_runs as run_fixtures
 from utils.presentation import chart_spec, csv_export, export_run
+from utils.result_view import render_table
 
 
 class PresentationTests(unittest.TestCase):
@@ -30,6 +31,14 @@ class PresentationTests(unittest.TestCase):
             "question": "question", "created_at": "2026-10-15", "status": "SUCCEEDED", "report": "Evidence"}}, "markdown")
         self.assertIn("Evidence", content)
         self.assertEqual((media, extension), ("text/markdown", "md"))
+
+    def test_table_renderer_preserves_nullable_big_integers(self):
+        value = 9007199254740993
+        with patch("utils.result_view.st") as streamlit:
+            render_table({"columns": ["amount"], "rows": [[value], [None]], "row_count": 2}, "precision")
+        displayed = streamlit.dataframe.call_args.args[0]
+        self.assertEqual(displayed.iloc[0, 0], value)
+        self.assertIsNone(displayed.iloc[1, 0])
 
 
 class ReplayTests(unittest.TestCase):

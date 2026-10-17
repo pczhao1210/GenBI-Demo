@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 from tests.helpers import ConfigTestCase, query_response
 from tests.test_service_api import plan
 from utils.config_manager import PROJECT_ROOT
+from utils.bi_service import BIService
 from utils.run_service import RunService
 from utils.run_store import RunStore
 
@@ -72,6 +73,32 @@ class PageTests(ConfigTestCase):
         self.assertEqual(self.config.load_schema_config()["athena"]["tables"], {})
         app.selectbox[0].set_value("legacy-mysql").run()
         self.assertEqual(set(app.session_state["table_fields"]), {"mysql_orders"})
+
+    def test_consecutive_new_connections_do_not_overwrite_saved_source(self):
+        app = self.page("database_config.py")
+        created = []
+        for name in ("first-new-source", "second-new-source"):
+            app.selectbox(key="source_connection_mysql").set_value("__new__").run()
+            identifier = app.session_state["new_source_mysql"]
+            app.text_input(key=f"{identifier}_name").set_value(name).run()
+            self.click(app, "💾 保存配置")
+            self.assertEqual(app.selectbox(key="source_connection_mysql").value, identifier)
+            created.append(identifier)
+        self.assertNotEqual(*created)
+        sources = self.config.load_datasources()
+        self.assertEqual([sources[identifier]["name"] for identifier in created],
+                         ["first-new-source", "second-new-source"])
+        app.text_input(key=f"{created[1]}_name").set_value("edited second source").run()
+        self.click(app, "💾 保存配置")
+        self.assertEqual(self.config.load_datasources()[created[0]]["name"], "first-new-source")
+        self.assertEqual(self.config.load_datasources()[created[1]]["name"], "edited second source")
+
+    def test_stale_new_source_draft_cannot_reuse_saved_id(self):
+        app = self.page("database_config.py")
+        app.session_state["new_source_mysql"] = "legacy-mysql"
+        app.selectbox(key="source_connection_mysql").set_value("__new__").run()
+        self.assertNotEqual(app.session_state["new_source_mysql"], "legacy-mysql")
+        self.assertEqual(self.config.resolve_datasource("legacy-mysql")["config"]["database"], "mysql_test")
 
     def test_schema_edits_survive_reruns(self):
         self.mcp.get_tables.return_value = ["mysql_orders"]
@@ -141,6 +168,35 @@ class PageTests(ConfigTestCase):
         app.button(key="stop_mysql").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(self.config.load_mcp_config()["mysql"]["status"], "inactive")
+
+    def test_management_discovers_unregistered_servers_without_overwriting_config(self):
+        previous = self.config.load_mcp_config()
+        self.mcp.discover_available_servers.return_value = {
+            "new_fixture": {"description": "new fixture"}, "mysql": {"description": "discovered mysql"},
+        }
+        app = self.page("mcp_management.py")
+        self.click(app, "🔄 发现服务器")
+        saved = self.config.load_mcp_config()
+        self.assertEqual(saved["mysql"], previous["mysql"])
+        self.assertEqual(saved["new_fixture"]["args"], ["mcp_servers/new_fixture_server.py"])
+        self.assertEqual(saved["new_fixture"]["status"], "inactive")
+
+    def test_standard_mcp_status_check_preserves_capability_routing(self):
+        self.config.save_mcp_config({"remote": {
+            "protocol": "mcp", "type": "streamable_http", "url": "http://example.invalid/mcp",
+            "status": "active", "capabilities": {"price.history": "history"},
+        }})
+        self.mcp.get_server_info.return_value = {
+            "name": "fixture", "protocol": "2025-06-18", "tools": [{"name": "history"}],
+        }
+        app = self.page("mcp_management.py")
+        app.button(key="check_remote").click().run()
+        self.assertEqual(len(app.exception), 0, str(app.exception))
+        self.assertEqual(self.config.load_mcp_config()["remote"]["capabilities"], {"price.history": "history"})
+        self.mcp.call_mcp_server.return_value = {"result": {"value": "12.5"}}
+        result = BIService(self.config, self.mcp).call_capability("price.history", {"region": "Shanghai"})
+        self.assertEqual(result, {"value": "12.5"})
+        self.mcp.call_mcp_server.assert_called_once_with("remote", "history", {"region": "Shanghai"})
 
     def test_home_onboarding_and_english_navigation(self):
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=15).run()

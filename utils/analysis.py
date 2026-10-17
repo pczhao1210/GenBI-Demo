@@ -112,7 +112,8 @@ def validate_conclusion(package, results):
     if package["answer_sufficiency"] == "SUFFICIENT" and not package["claims"]:
         raise ValueError("A sufficient answer requires evidence-bound claims")
     for claim in package["claims"]:
-        if not isinstance(claim.get("text"), str) or not isinstance(claim.get("facts"), list):
+        if (not isinstance(claim, dict) or not isinstance(claim.get("text"), str)
+                or not isinstance(claim.get("facts"), list)):
             raise ValueError("Claim requires text and exact numeric fact bindings")
         refs = claim.get("evidence", [])
         if not refs or any(type(ref) is not int or ref not in results for ref in refs):
@@ -120,14 +121,35 @@ def validate_conclusion(package, results):
         if any(results[ref].get("evidence_class") in ("interpretation", "discovery") for ref in refs):
             raise ValueError("Interpretation or search discovery cannot substitute for source evidence")
         for fact in claim["facts"]:
-            ref, column, row = fact.get("step_id"), fact.get("column"), fact.get("row")
-            if type(ref) is not int or ref not in refs or type(row) is not int or row < 0:
+            if not isinstance(fact, dict):
+                raise ValueError("Fact binding must be an object")
+            ref = fact.get("step_id")
+            if type(ref) is not int or ref not in refs:
                 raise ValueError("Invalid fact coordinates")
             data = results[ref].get("data")
-            if (not isinstance(data, dict) or column not in data.get("columns", [])
-                    or row >= len(data.get("rows", []))):
-                raise ValueError("Fact references unavailable result cell")
-            value = data["rows"][row][data["columns"].index(column)]
+            if "fact_index" in fact:
+                index = fact["fact_index"]
+                observations = data.get("facts", []) if isinstance(data, dict) else []
+                if (results[ref].get("evidence_class") != "observation" or type(index) is not int
+                        or index < 0 or not isinstance(observations, list) or index >= len(observations)
+                        or "column" in fact or "row" in fact):
+                    raise ValueError("Fact references unavailable external observation")
+                observation = observations[index]
+                if not isinstance(observation, dict) or "value" not in observation:
+                    raise ValueError("External observation is missing its value")
+                position = observation.get("source_position", observation.get("span"))
+                if not observation.get("source_url") or position is None:
+                    raise ValueError("External observation requires a traceable source position")
+                value = observation["value"]
+                fact.update(source_url=observation["source_url"], source_position=position)
+            else:
+                column, row = fact.get("column"), fact.get("row")
+                if type(row) is not int or row < 0:
+                    raise ValueError("Invalid fact coordinates")
+                if (not isinstance(data, dict) or column not in data.get("columns", [])
+                        or row >= len(data.get("rows", []))):
+                    raise ValueError("Fact references unavailable result cell")
+                value = data["rows"][row][data["columns"].index(column)]
             if type(value) is not type(fact.get("value")) or value != fact.get("value"):
                 raise ValueError("Assessment changed a bound result value")
         allowed = {str(fact["value"]) for fact in claim["facts"]}
@@ -159,6 +181,10 @@ def assess(question, results, ledger, call_model):
         '"facts":[{"step_id":1,"column":"exact column","row":0,"value":"exact cell value and JSON type"}],'
         '"evidence":[1]}],"hypotheses":[{"id":"h","status":"UNTESTED|SUPPORTED|REFUTED|INCONCLUSIVE",'
         '"evidence":[1]}],"gaps":["unresolved need"],"next_plan":null}. '
+        "For external observations use a fact binding "
+        '{"step_id":1,"fact_index":0,"value":"exact observation value and JSON type"} '
+        "instead of column/row. fact_index is the zero-based index in that step's data.facts; "
+        "source URL and position are attached by code, never invent them. "
         "A supported hypothesis is NOT causal proof. Verify the phenomenon and comparable definitions first. "
         "If premise is false, stop. Search snippets are discovery, not facts. "
         "Truncated or summarized rows cannot support full-population claims. "
@@ -185,7 +211,11 @@ def render_conclusion(package, call_model):
         claim = package["claims"][index]
         lines.append(f"- {claim['text']} [steps: {', '.join(map(str, claim['evidence']))}]")
         for fact in claim["facts"]:
-            lines.append(f"  - {fact['column']}: {fact['value']} [step {fact['step_id']}, row {fact['row']}]")
+            if "fact_index" in fact:
+                lines.append(f"  - {fact['value']} [step {fact['step_id']}, fact {fact['fact_index']}; "
+                             f"source: {fact['source_url']}; position: {fact['source_position']}]")
+            else:
+                lines.append(f"  - {fact['column']}: {fact['value']} [step {fact['step_id']}, row {fact['row']}]")
     lines.extend(f"- Gap: {gap}" for gap in package["gaps"])
     lines.append("Supported hypotheses indicate evidence, not proof of causality.")
     return "\n".join(lines)

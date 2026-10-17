@@ -1,11 +1,14 @@
-from datetime import date
+from datetime import date, time, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 from tests.helpers import ConfigTestCase, query_response
 from utils.bi_service import BIService
 from utils.datasources import DatabaseAdapter, normalize_engine
 from utils.sql_utils import validate_readonly_sql
+from utils.run_service import RunService
+from utils.run_store import RunStore
 
 
 class DatasourceTests(ConfigTestCase):
@@ -67,6 +70,36 @@ class DatasourceTests(ConfigTestCase):
         with patch.dict("sys.modules", {"pyodbc": module}):
             with self.assertRaisesRegex(RuntimeError, "System ODBC driver not installed"):
                 adapter.diagnostics()
+
+    def test_native_database_types_survive_query_and_artifact_persistence(self):
+        self.config.save_datasource({
+            "datasource_id": "pg", "engine": "postgresql", "name": "pg",
+            "config": {"database": "fixture"},
+            "schema": {"tables": {"events": [{"name": "value", "type": "text"}]}},
+        })
+        identifier = UUID("00000000-0000-0000-0000-000000000001")
+        values = [identifier, time(12, 30, 1, 123456), timedelta(days=-1, seconds=1),
+                  [identifier, None, {"amount": Decimal("0.1234567890123456789")}]]
+        self.llm.generate_sql.return_value = "SELECT value FROM events"
+        engine = MagicMock()
+        cursor = engine.connect.return_value.__enter__.return_value.execute.return_value
+        cursor.keys.return_value = ["value"]
+        cursor.cursor.description = [("value", object)]
+        cursor.fetchmany.return_value = [(value,) for value in values]
+        runs = RunService(RunStore(self.config.config_dir / "native.sqlite3"), self.config,
+                          lambda **kw: BIService(kw["config_manager"], self.mcp, self.llm))
+        run_id = runs.submit("native values", database="pg", plan={"steps": [
+            {"step_id": 1, "step_type": "sql_query"},
+        ]})["run_id"]
+        with patch("utils.datasources.DatabaseAdapter._engine", return_value=engine):
+            runs.execute(run_id)
+        state = runs.store.get(run_id)
+        self.assertEqual(state["status"], "SUCCEEDED", state)
+        result = runs.store.artifact(run_id, state["steps"]["1"]["artifact_id"])
+        self.assertEqual(result["data"]["rows"], [
+            [str(identifier)], ["12:30:01.123456"], [str(values[2])],
+            [[str(identifier), None, {"amount": "0.1234567890123456789"}]],
+        ])
 
     def test_preview_uses_target_dialect_and_quotes_identifier(self):
         adapter = DatabaseAdapter({"datasource_id": "ms", "engine": "mssql", "config": {"schema": "dbo"}})

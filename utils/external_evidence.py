@@ -123,7 +123,8 @@ def extract_structured(document, need, mapping):
             selected, limits = align_facts([fact], need, {**document, "text": text})
             for item in selected:
                 item.pop("span")
-                item.update(source_position="/" + "/".join(map(str, [*path, index])),
+                item.update(source_position="/" + "/".join(
+                                str(key).replace("~", "~0").replace("/", "~1") for key in [*path, index]),
                             position_kind="json_pointer", field_mapping=mapping)
             facts.extend(selected)
             warnings.extend(limits)

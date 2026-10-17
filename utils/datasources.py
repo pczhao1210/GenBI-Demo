@@ -1,6 +1,7 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import URL, create_engine, inspect, text
@@ -49,12 +50,16 @@ def validate_source(source):
 
 
 def serialize_cell(value):
-    if isinstance(value, Decimal):
+    if isinstance(value, (Decimal, UUID, timedelta)):
         return str(value)
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, bytes):
         return value.hex()
+    if isinstance(value, (list, tuple)):
+        return [serialize_cell(item) for item in value]
+    if isinstance(value, dict):
+        return {key: serialize_cell(item) for key, item in value.items()}
     return value
 
 

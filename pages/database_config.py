@@ -13,10 +13,20 @@ config = ConfigManager()
 sources = config.load_datasources()
 engine = st.selectbox(t("select_database"), ENGINES)
 candidates = [key for key, value in sources.items() if value["engine"] == engine]
+selection_key = f"source_connection_{engine}"
+saved_key = f"saved_source_{engine}"
+saved_id = st.session_state.pop(saved_key, None)
+if saved_id in candidates:
+    st.session_state[selection_key] = saved_id
+    st.success(t("config_saved"))
 selection = st.selectbox(t("source_connection"), [*candidates, "__new__"],
-                         format_func=lambda key: t("new_connection") if key == "__new__" else sources[key]["name"])
+                         format_func=lambda key: t("new_connection") if key == "__new__" else sources[key]["name"],
+                         key=selection_key)
 if selection == "__new__":
-    key = st.session_state.setdefault(f"new_source_{engine}", uuid4().hex[:12])
+    draft_key = f"new_source_{engine}"
+    if st.session_state.get(draft_key) in sources:
+        st.session_state.pop(draft_key)
+    key = st.session_state.setdefault(draft_key, uuid4().hex[:12])
     source = {"datasource_id": key, "name": engine, "engine": engine, "config": {}, "schema": {}}
 else:
     source = sources[selection]
@@ -77,6 +87,10 @@ try:
         st.success(t("connection_test_success"))
     if right.button(t("save_source"), type="primary"):
         config.save_datasource(source)
+        if selection == "__new__":
+            st.session_state.pop(draft_key, None)
+            st.session_state[saved_key] = source["datasource_id"]
+            st.rerun()
         st.success(t("config_saved"))
     if st.button(t("source_diagnostics")):
         st.json(adapter.diagnostics())
