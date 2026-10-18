@@ -194,6 +194,8 @@ class ToolCatalog:
                 if not isinstance(mappings, dict):
                     raise ValueError(f"Standard MCP capabilities must be a mapping: {server_id}")
                 capabilities = [key for key, value in mappings.items() if value == name]
+                if not capabilities:
+                    capabilities = [f"mcp.{server_id}.{name}"]
                 categories = server.get("categories", [])
                 annotations = tool.get("annotations") or {}
                 read_only = annotations.get("readOnlyHint", server.get("template") == "fetch"
@@ -203,7 +205,8 @@ class ToolCatalog:
                 definition = {
                     "tool_id": f"mcp:{server_id}:{name}", "backend": "mcp", "server_id": server_id,
                     "tool_name": name, "categories": categories, "capabilities": capabilities,
-                    "description": tool.get("description", name), "when_to_use": server.get("when_to_use", ""),
+                    "description": tool.get("description", name),
+                    "when_to_use": server.get("when_to_use") or tool.get("description", ""),
                     "input_schema": tool["inputSchema"], "output_schema": tool.get("outputSchema"),
                     "output_kind": "interpretation" if reasoning else "unverified",
                     "enabled": not server.get("tool_confirmation_required", False),

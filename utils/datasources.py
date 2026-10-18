@@ -38,6 +38,21 @@ def validate_source(source):
     if not source.get("name") or not isinstance(source.get("config"), dict):
         raise ValueError("Datasource name and connection object are required")
     source.setdefault("schema", {})
+    schema = source["schema"]
+    if not isinstance(schema, dict) or not isinstance(schema.get("tables", {}), dict):
+        raise ValueError("Schema requires tables keyed by table name")
+    if not isinstance(schema.get("table_scopes", {}), dict):
+        raise ValueError("Table scopes must be keyed by table name")
+    if set(schema.get("table_scopes", {})) - set(schema.get("tables", {})):
+        raise ValueError("Table visibility references an unsaved table")
+    for table, info in schema.get("tables", {}).items():
+        columns = info.get("columns", []) if isinstance(info, dict) else info
+        if (not isinstance(table, str) or not table.strip() or not isinstance(columns, list)
+                or any(not isinstance(c, dict) or not isinstance(c.get("name"), str) or not c["name"].strip()
+                       for c in columns)):
+            raise ValueError("Table schemas require named columns")
+        if len({c["name"] for c in columns}) != len(columns):
+            raise ValueError(f"Duplicate column names in table {table}")
     source.setdefault("timezone", "UTC")
     try:
         ZoneInfo(source["timezone"])

@@ -6,6 +6,7 @@ from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
 from utils.i18n import t
 from utils.datasources import DatabaseAdapter
+from utils.profile_ui import ui_config, visibility_editor, writing_example
 
 st.set_page_config(page_title="Schema Configuration", page_icon="📋")
 st.title(t('database_schema_config'))
@@ -28,8 +29,9 @@ with st.expander("📚 多表Schema配置工作流程", expanded=False):
     - 最后点击保存按钮时，会将所有表的配置一次性写入文件
     """)
 
-config_manager = ConfigManager()
-mcp_client = MCPClient()
+config_manager = ui_config()
+mcp_client = MCPClient(config_manager)
+writing_example("schema", t("schema_writing_example"))
 
 # 数据库选择
 sources = config_manager.load_datasources()
@@ -49,16 +51,17 @@ if not db_config:
     st.warning(t('config_db_connection_first').format(db_type=database.upper()))
     st.stop()
 
-source = database + hashlib.sha256(json.dumps(db_config, sort_keys=True).encode()).hexdigest()
+source = f"{config_manager.profile_id or 'shared'}:{database}:" + hashlib.sha256(json.dumps(db_config, sort_keys=True).encode()).hexdigest()
 editors = st.session_state.setdefault("schema_editors", {})
 if source not in editors:
     schema_config = config_manager.load_schema_config().get(database, {})
     editors[source] = {
-        "tables": [], "fields": {
+        "tables": list(schema_config.get("tables", {})), "fields": {
             table: copy.deepcopy(info.get("columns", []) if isinstance(info, dict) else info)
             for table, info in schema_config.get("tables", {}).items()
         },
-        "descriptions": copy.deepcopy(schema_config.get("descriptions", {})), "revision": 0,
+        "descriptions": copy.deepcopy(schema_config.get("descriptions", {})),
+        "table_scopes": copy.deepcopy(schema_config.get("table_scopes", {})), "revision": 0,
     }
 editor = editors[source]
 st.session_state.tables = editor["tables"]
@@ -70,13 +73,30 @@ col1, col2 = st.columns([1, 2])
 
 with col1:
     st.subheader(t('table_list'))
+    with st.expander(t("manual_table_schema")):
+        st.caption(t("schema_edit_only"))
+        new_table = st.text_input(t("table_name"), key=f"{source}_new_table").strip()
+        if st.button(t("add_table_schema"), key=f"{source}_add_table"):
+            existing = [item["name"] if isinstance(item, dict) else item for item in editor["tables"]]
+            if not new_table or new_table in existing:
+                st.error(t("schema_unique_table"))
+            elif not config_manager.table_visible(database, new_table):
+                st.error(t("schema_unavailable_table"))
+            else:
+                editor["tables"] = existing + [new_table]
+                editor["fields"][new_table] = []
+                editor["selected_table"] = new_table
+                st.rerun()
     
     if st.button(t('refresh_schema')):
         with st.spinner("正在获取表列表..."):
             try:
                 tables = (mcp_client.get_tables(engine, db_config) if engine in ("mysql", "athena")
                           else adapter.metadata()["tables"])
-                editor["tables"] = st.session_state.tables = tables
+                tables = [table for table in tables if config_manager.table_visible(
+                    database, table.get("name", str(table)) if isinstance(table, dict) else table)]
+                names = [item["name"] if isinstance(item, dict) else item for item in tables]
+                editor["tables"] = st.session_state.tables = list(dict.fromkeys([*names, *editor["fields"]]))
                 st.success(f"已获取{len(tables)}个表")
             except RuntimeError as exc:
                 st.error(str(exc))
@@ -86,7 +106,8 @@ with col1:
         if st.session_state.tables and isinstance(st.session_state.tables[0], dict):
             # 如果是字典列表，提取表名
             table_names = [table.get('name', str(table)) for table in st.session_state.tables]
-            selected_table = st.selectbox(t('select_table'), table_names)
+            selected_table = st.selectbox(t('select_table'), table_names,
+                                          key=f"{source}_table")
             
             # 显示表的详细信息
             if selected_table:
@@ -100,7 +121,11 @@ with col1:
                         st.caption(f"预估行数: {table_info['estimated_rows']:,}")
         else:
             # 如果是字符串列表，直接使用
-            selected_table = st.selectbox(t('select_table'), st.session_state.tables)
+            if "selected_table" in editor:
+                st.session_state[f"{source}_table"] = editor.pop("selected_table")
+            if st.session_state.get(f"{source}_table") not in st.session_state.tables:
+                st.session_state.pop(f"{source}_table", None)
+            selected_table = st.selectbox(t('select_table'), st.session_state.tables, key=f"{source}_table")
     else:
         st.info(t('click_refresh_schema'))
         selected_table = None
@@ -108,6 +133,11 @@ with col1:
 with col2:
     if selected_table:
         st.subheader(f"{t('table_details')}: {selected_table}")
+        table_scope = visibility_editor(
+            editor["table_scopes"].get(selected_table, {}), f"{widget_prefix}_{selected_table}",
+            config_manager.profile_id, new=selected_table not in datasource["schema"].get("tables", {}))
+        editor["table_scopes"][selected_table] = table_scope
+        st.caption(t("table_scope_help"))
         
         # 表描述
         description = st.text_area(
@@ -184,15 +214,31 @@ with col2:
             with st.expander(t("batch_descriptions")):
                 import pandas as pd
                 edits = st.data_editor(pd.DataFrame([
-                    {"name": field["name"], "comment": field.get("comment", ""),
-                     "business_key": bool(field.get("business_key", False))} for field in fields]),
-                    disabled=["name"], hide_index=True, key=f"{widget_prefix}_batch_{selected_table}")
+                    {"name": field["name"], "type": field.get("type", ""), "comment": field.get("comment", ""),
+                     "business_key": bool(field.get("business_key", False))} for field in fields],
+                    columns=["name", "type", "comment", "business_key"]),
+                    num_rows="dynamic", hide_index=True, key=f"{widget_prefix}_batch_{selected_table}")
+                st.caption(t("schema_edit_only"))
                 if st.button(t("apply_descriptions"), key=f"{widget_prefix}_apply_{selected_table}"):
-                    by_name = edits.set_index("name").to_dict("index")
-                    for field in fields:
-                        field.update(by_name[field["name"]])
-                    editor["revision"] += 1
-                    st.rerun()
+                    try:
+                        updated = edits.astype(object).where(edits.notna(), None).to_dict("records")
+                        for field in updated:
+                            if isinstance(field["name"], str):
+                                field["name"] = field["name"].strip()
+                            field["type"] = field["type"] or ""
+                            field["comment"] = field["comment"] or ""
+                            field["business_key"] = bool(field["business_key"])
+                        names = [field.get("name") for field in updated]
+                        if (any(not isinstance(name, str) or not name.strip() for name in names)
+                                or len(set(names)) != len(names)):
+                            raise ValueError(t("schema_unique_fields"))
+                        old_fields = {field["name"]: field for field in fields}
+                        editor["fields"][selected_table] = [
+                            {**old_fields.get(field["name"], {}), **field} for field in updated]
+                        editor["revision"] += 1
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
             
             for i, field in enumerate(fields):
                 field_name = field.get("name", "")
@@ -224,6 +270,18 @@ with col2:
                         st.session_state.table_fields[selected_table][i]["comment"] = new_desc
         else:
             st.info(t('click_get_field_info'))
+        consent = st.checkbox(t("delete_config_confirmation"), key=f"{widget_prefix}_{selected_table}_delete_confirm")
+        if st.button(t("delete_table_schema"), disabled=not consent, key=f"{widget_prefix}_{selected_table}_delete"):
+            try:
+                remaining = {key: value for key, value in editor["fields"].items() if key != selected_table}
+                descriptions = {key: value for key, value in editor["descriptions"].items() if key in remaining}
+                scopes = {key: value for key, value in editor["table_scopes"].items() if key in remaining}
+                config_manager.save_schema_config(database, {
+                    "tables": remaining, "descriptions": descriptions, "table_scopes": scopes})
+                editors.pop(source)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
     else:
         st.info(t('select_table_first'))
 
@@ -270,7 +328,9 @@ with col1:
             # 构建配置数据
             schema_data = {
                 "tables": st.session_state.table_fields,
-                "descriptions": st.session_state.table_descriptions
+                "descriptions": st.session_state.table_descriptions,
+                "table_scopes": {key: value for key, value in editor["table_scopes"].items()
+                                 if key in st.session_state.table_fields},
             }
             
             # 统计信息
@@ -295,13 +355,14 @@ with col1:
             st.error(f"❌ 保存失败: {str(e)}")
 
 with col2:
-    if st.button("🗑️ 清空配置"):
-        config_manager.save_schema_config(database, {"tables": {}, "descriptions": {}})
-        st.session_state.table_fields.clear()
-        st.session_state.table_descriptions.clear()
-        editor["revision"] += 1
-        st.success("✅ 已清空所有配置")
-        st.rerun()
+    clear_confirmed = st.checkbox(t("delete_config_confirmation"), key=f"{widget_prefix}_clear_confirm")
+    if st.button("🗑️ 清空配置", disabled=not clear_confirmed):
+        try:
+            config_manager.save_schema_config(database, {"tables": {}, "descriptions": {}, "table_scopes": {}})
+            editors.pop(source)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 # 显示已保存的配置
 if st.checkbox(t('show_saved_schema')):

@@ -1,10 +1,12 @@
 import streamlit as st
 
 from utils.i18n import language_selector, t
+from utils.profile_ui import profile_selector
 
 st.set_page_config(page_title="GenBI", page_icon="🔍", layout="wide")
 with st.sidebar:
     language_selector()
+    profile_selector()
 navigation = st.navigation({
     t("workspace_nav"): [
         st.Page("pages/start.py", title=t("start_page"), icon="🏠", default=True),
@@ -12,6 +14,7 @@ navigation = st.navigation({
         st.Page("pages/scenarios.py", title=t("demo_scenarios"), icon="🎬"),
     ],
     t("configuration_nav"): [
+        st.Page("pages/profiles.py", title=t("profiles_title"), icon="🧭"),
         st.Page("pages/database_config.py", title=t("database_config"), icon="🗄️"),
         st.Page("pages/schema_config.py", title=t("schema_config"), icon="📋"),
         st.Page("pages/semantics.py", title=t("semantics_title"), icon="📚"),

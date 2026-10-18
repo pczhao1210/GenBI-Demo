@@ -3,20 +3,24 @@ import streamlit as st
 from utils.config_manager import ConfigManager
 from utils.i18n import t
 from utils.run_service import get_run_service
+from utils.model_config import model_name
+from utils.profile_ui import ui_config
 
 st.title(t("app_title"))
 st.write(t("welcome_description"))
-config = ConfigManager()
+config = ui_config()
 sources = config.load_datasources()
 metrics = config.load_semantics().get("metrics", {})
 steps = [
-    (t("llm_config"), bool(config.load_llm_config()), "pages/llm_config.py"),
+    (t("llm_config"), bool(model_name(config.load_llm_config())), "pages/llm_config.py"),
     (t("database_config"), any(source["config"] for source in sources.values()), "pages/database_config.py"),
     (t("schema_config"), any(source["schema"].get("tables") for source in sources.values()), "pages/schema_config.py"),
-    (t("ontology_title"), any(metric.get("mappings") for metric in metrics.values()), "pages/semantics.py"),
+    (t("ontology_title"), any(metric.get("description") for metric in metrics.values()), "pages/semantics.py"),
+    (t("profiles_title"), bool(config.load_profiles()), "pages/profiles.py"),
 ]
 st.subheader(t("setup_wizard"))
 st.caption(t("configured_not_connected"))
+st.info(t("setup_path"))
 for number, (label, ready, path) in enumerate(steps, 1):
     with st.container(border=True):
         left, right = st.columns([4, 1])

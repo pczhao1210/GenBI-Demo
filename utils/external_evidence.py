@@ -113,13 +113,8 @@ def extract_evidence(document, need, call_model):
         return {"sources": [document], "facts": [], "warnings": ["Document exceeds extraction budget; narrow the source."]}
     extracted = parse_json(call_model(
         "fast", "generate_response",
-        'Extract only explicitly stated observations as JSON {"facts":[{"variable":"...",'
-        '"value":"exact numeric text","unit":"exact text","region":"exact text",'
-        '"observed_at":"exact ISO timestamp with timezone","span":[start,end]}]}. '
-        "Every value, unit, region and observed_at must appear verbatim in the cited source span. "
-        "Do not infer history from current values, or causality from background. Return [] if unavailable."
         f"\nEvidence need: {json.dumps(need, ensure_ascii=False)}\nDocument:\n{document['text']}",
-        request_type="query"))
+        request_type="query", node="extraction"))
     if not isinstance(extracted.get("facts"), list):
         raise ValueError("External extraction requires a facts list")
     facts, warnings = align_facts(extracted["facts"], need, document)

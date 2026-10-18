@@ -4,6 +4,7 @@ from copy import deepcopy
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from utils.config_manager import ConfigManager
 from utils.mcp_client import MCPClient
@@ -99,10 +100,16 @@ class ToolManagement:
                 raise ValueError("Invalid MCP discovery result")
             names = set()
             for tool in tools:
-                if not isinstance(tool.get("name"), str) or tool["name"] in names:
+                if (not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+                        or not tool["name"] or tool["name"] in names):
                     raise ValueError("MCP discovery requires unique tool names")
                 names.add(tool["name"])
-                Draft202012Validator.check_schema(tool["inputSchema"])
+                if not isinstance(tool.get("inputSchema"), dict):
+                    raise ValueError("Discovered tools require an inputSchema object")
+                try:
+                    Draft202012Validator.check_schema(tool["inputSchema"])
+                except SchemaError as exc:
+                    raise ValueError(f"Invalid inputSchema for tool {tool['name']}: {exc.message}") from exc
             mappings = server.get("capabilities", {})
             if any(name not in names for name in mappings.values()):
                 raise ValueError("Capability mapping does not match discovered tool names")
@@ -111,6 +118,21 @@ class ToolManagement:
                 "schema_fingerprint": version_of(tools),
             })
         return info
+
+    def connect_server(self, server_id, settings, confirmed=False):
+        if not confirmed:
+            raise ValueError("Confirm execution: connection tests may download and run third-party software")
+        self.save_server(server_id, settings)
+        try:
+            info = self.discover(server_id, confirmed=True)
+            def disable_discovered(config):
+                for tool in info.get("tools", []):
+                    config["tools"].setdefault(f"mcp:{server_id}:{tool['name']}", {})["enabled"] = False
+            self.config.update_tools_config(disable_discovered)
+            self.set_server_enabled(server_id, True)
+            return info
+        except (ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"Connection saved as disabled; verification failed: {exc}") from exc
 
     def set_server_enabled(self, server_id, enabled):
         servers = self.config.load_mcp_config()

@@ -32,24 +32,19 @@ def resolve_time(value, requested_at, timezone, business_day_start=0):
 
 
 def understand(question, context, requested_at, source, ontology, call_model, available_results=None,
-               datasource_ids=None):
+               datasource_ids=None, schemas=None, query_guidance=None, knowledge_context=None):
     active_ids = set(datasource_ids if datasource_ids is not None else [source.get("datasource_id")])
     prompt = (
-        "Extract intent and NER slot PATCHES as JSON only. Do not answer or calculate. "
-        'Shape: {"intent":"query|analysis|concept|reject","followup":false,'
-        '"slots":{"metrics":{"value":["metric_id"],"span":[0,4]}},'
-        '"clarification":null}. Slots allowed: entities, metrics, dimensions, filters, time, '
-        "comparison, result_reference. Each slot has value and exact [start,end] character span "
-        "in the current question. Time value: {expression: today|yesterday|day before yesterday|"
-        "今天|昨天|前天}, or explicit ISO start/end. Other ID slots use arrays of ontology IDs. "
-        "Only include slots explicitly changed now. Inherit nothing yourself. Keep negations, "
-        "filters and comparison baselines. For ambiguous meaning return clarification as a question. "
         f"\nCurrent question: {question}\nPrevious slots: {json.dumps(context, ensure_ascii=False)}"
         f"\nOntology: {json.dumps(ontology, ensure_ascii=False)}"
         f"\nAvailable result references: {json.dumps(available_results or [])}"
         f"\nActive datasource IDs: {json.dumps(sorted(identifier for identifier in active_ids if identifier))}"
+        f"\nAvailable schemas for resolving business definitions (no other resources are available): "
+        f"{json.dumps(schemas or {}, ensure_ascii=False)}"
+        f"\nMatched query guidance (not live evidence or extra permissions): {json.dumps(query_guidance or [], ensure_ascii=False)}"
+        f"\nStage knowledge (definitions and guidance, not live observations): {json.dumps(knowledge_context or {}, ensure_ascii=False)}"
     )
-    extracted = parse_json(call_model("fast", "generate_response", prompt, request_type="query"))
+    extracted = parse_json(call_model("fast", "generate_response", prompt, request_type="query", node="understanding"))
     if extracted.get("intent") not in ("query", "analysis", "concept", "reject"):
         raise ValueError("Invalid structured intent")
     if type(extracted.get("followup")) is not bool or not isinstance(extracted.get("slots"), dict):
@@ -84,15 +79,24 @@ def understand(question, context, requested_at, source, ontology, call_model, av
     metrics = slots.get("metrics", {}).get("value", [])
     dimensions = set(slots.get("dimensions", {}).get("value", []))
     requires_plan = bool(active_ids) and source.get("datasource_id") not in active_ids
+    runtime_metrics = []
     for metric_id in metrics:
         metric = ontology["metrics"][metric_id]
-        if not dimensions <= set(metric["allowed_dimensions"]):
+        if "allowed_dimensions" in metric and not dimensions <= set(metric["allowed_dimensions"]):
             clarification = f"Dimensions are incompatible with metric {metric_id}; specify a compatible definition"
         if extracted["intent"] != "concept":
-            if not active_ids.intersection(metric["mappings"]):
-                clarification = f"Metric {metric_id} is explainable but not computable on the active datasources"
-            if source.get("datasource_id") not in metric["mappings"]:
-                requires_plan = True
+            mappings = metric.get("mappings", {})
+            if mappings:
+                if not active_ids.intersection(mappings):
+                    clarification = f"Metric {metric_id} is not computable on the active datasources; its explicit mapping is outside the active set"
+                if source.get("datasource_id") not in mappings:
+                    requires_plan = True
+            else:
+                runtime_metrics.append(metric_id)
+                if not any((schemas or {}).get(identifier, {}).get("schema", {}).get("tables")
+                           for identifier in active_ids):
+                    clarification = f"Metric {metric_id} needs a saved schema in the active Profile to resolve its business definition"
+                requires_plan = requires_plan or len(active_ids) > 1
     references = slots.get("result_reference", {}).get("value", [])
     if isinstance(references, list) and len(references) > 1:
         clarification = "Multiple result references; specify exactly one result"
@@ -103,4 +107,5 @@ def understand(question, context, requested_at, source, ontology, call_model, av
             clarification = "Multiple previous results; specify exactly one result reference"
     normalized = f"{question}\nConfirmed slot context: {json.dumps(slots, ensure_ascii=False)}"
     return {"intent": extracted["intent"], "slots": slots, "normalized_question": normalized,
-            "clarification": clarification, "requested_at": requested_at, "requires_plan": requires_plan}
+            "clarification": clarification, "requested_at": requested_at, "requires_plan": requires_plan,
+            "runtime_metrics": runtime_metrics}

@@ -7,6 +7,7 @@ from utils.semantics import KnowledgeIndex, parse_json
 
 
 def validate_methods(library, previous=None):
+    from utils.knowledge_center import validate_stages
     if not isinstance(library, dict) or not isinstance(library.get("methods", []), list):
         raise ValueError("Method library requires methods list")
     ids = set()
@@ -18,6 +19,7 @@ def validate_methods(library, previous=None):
         if not isinstance(item, dict) or not required <= item.keys() or item["id"] in ids:
             raise ValueError("Method definition is incomplete or duplicated")
         ids.add(item["id"])
+        validate_stages(item, "methods")
         before = old.get(item["id"], {}).get("status", "draft")
         if item["status"] not in transitions[before]:
             raise ValueError("Methods must move through draft -> validated -> published -> deprecated")
@@ -30,16 +32,25 @@ def validate_methods(library, previous=None):
                 raise ValueError("Publishing requires reviewed validation and regression fixture IDs")
         if not isinstance(item.get("cases", []), list):
             raise ValueError("Method cases must be a list")
+        case_ids = set()
         for case in item.get("cases", []):
             if not isinstance(case, dict) or not case.get("id") or case.get("status") not in (
                     "draft", "validated", "published", "deprecated"):
                 raise ValueError("Cases require stable IDs and validation status")
+            if case["id"] in case_ids:
+                raise ValueError("Duplicate case ID")
+            case_ids.add(case["id"])
+            validate_stages(case, "cases")
             if case["status"] == "published" and (
                     not case.get("validation", {}).get("reviewer")
                     or case.get("validation", {}).get("passed") is not True
                     or not case.get("validation", {}).get("fixture_ids")):
                 raise ValueError("Published cases require reviewed regression validation")
-        validate_plan(item["template"])
+        template = item["template"]
+        if not isinstance(template, dict) or not isinstance(template.get("steps"), list):
+            raise ValueError("Method template requires a steps list")
+        if template["steps"] or item["status"] in ("validated", "published"):
+            validate_plan(template)
     return library
 
 
@@ -47,12 +58,22 @@ class MethodLibrary:
     def __init__(self, library):
         self.methods = [item for item in library.get("methods", []) if item["status"] == "published"]
 
-    def retrieve(self, question, capabilities, conditions):
+    def retrieve(self, question, capabilities, conditions, preferred_ids=None, stage=None):
+        from utils.knowledge_center import stages_for
         suitable = [item for item in self.methods if set(item["required_capabilities"]) <= set(capabilities)
-                    and all(conditions.get(key) == value for key, value in item["preconditions"].items())]
-        docs = [{"id": item["id"], "title": item["title"], "text": item["description"],
+                    and all(conditions.get(key) == value for key, value in item["preconditions"].items())
+                    and (stage is None or stage in stages_for(item, "methods"))]
+        docs = [{"id": item["id"], "title": item["title"], "text": item["description"] + "\n" + "\n".join(
+                    json.dumps(case.get("problem_structure", ""), ensure_ascii=False)
+                    for case in item.get("cases", [])
+                    if case.get("status") == "published" and case.get("validation", {}).get("passed") is True
+                    and (stage is None or stage in stages_for(case, "cases"))
+                    and all(conditions.get(key) == value for key, value in case.get("preconditions", {}).items())),
                  "source": "method-library", "version": str(item["version"]), "scope": "*"} for item in suitable]
         selected = KnowledgeIndex({"documents": docs}).search(question, limit=3)
+        preferred = [item for item in suitable if item["id"] in (preferred_ids or [])]
+        selected = ([{"id": item["id"]} for item in preferred]
+                    + [chunk for chunk in selected if chunk["id"] not in {item["id"] for item in preferred}])[:3]
         results = []
         for chunk in selected:
             item = next(item for item in suitable if item["id"] == chunk["id"])
@@ -62,6 +83,7 @@ class MethodLibrary:
                  if key in case}
                 for case in item.get("cases", [])
                 if case.get("status") == "published" and case.get("validation", {}).get("passed") is True
+                and (stage is None or stage in stages_for(case, "cases"))
                 and all(conditions.get(key) == value for key, value in case.get("preconditions", {}).items())
             ][:3]
             results.append(portable)
@@ -175,33 +197,17 @@ def validate_conclusion(package, results):
 
 def assess(question, results, ledger, call_model):
     prompt = (
-        "Assess evidence, not tool success. Output JSON: "
-        '{"answer_sufficiency":"SUFFICIENT|QUALIFIED|INSUFFICIENT",'
-        '"premise":"CONFIRMED|REFUTED|UNKNOWN","claims":[{"text":"claim without unbound numbers",'
-        '"facts":[{"step_id":1,"column":"exact column","row":0,"value":"exact cell value and JSON type"}],'
-        '"evidence":[1]}],"hypotheses":[{"id":"h","status":"UNTESTED|SUPPORTED|REFUTED|INCONCLUSIVE",'
-        '"evidence":[1]}],"gaps":["unresolved need"],"next_plan":null}. '
-        "For external observations use a fact binding "
-        '{"step_id":1,"fact_index":0,"value":"exact observation value and JSON type"} '
-        "instead of column/row. fact_index is the zero-based index in that step's data.facts; "
-        "source URL and position are attached by code, never invent them. "
-        "A supported hypothesis is NOT causal proof. Verify the phenomenon and comparable definitions first. "
-        "If premise is false, stop. Search snippets are discovery, not facts. "
-        "Truncated or summarized rows cannot support full-population claims. "
-        "Request next_plan only for a specific gap with expected new evidence; use a complete valid DAG. "
         f"\nQuestion: {question}\nLedger: {json.dumps(ledger, ensure_ascii=False)}"
         f"\nEvidence: {json.dumps(evidence_summary(results), ensure_ascii=False)}"
     )
     return validate_conclusion(parse_json(call_model("reasoning", "generate_response", prompt,
-                                                   request_type="analysis")), results)
+                                                   request_type="analysis", node="assessment")), results)
 
 
 def render_conclusion(package, call_model):
     presentation = parse_json(call_model(
         "fast", "generate_response",
-        "Arrange these immutable conclusions for display. Return only JSON "
-        '{"claim_order":[0,1],"style":"bullets"}. Do not rewrite facts, claims or references.\n'
-        + json.dumps(package, ensure_ascii=False), request_type="query"))
+        json.dumps(package, ensure_ascii=False), request_type="query", node="presentation"))
     order = presentation.get("claim_order")
     if (not isinstance(order, list) or any(type(i) is not int for i in order)
             or sorted(order) != list(range(len(package["claims"])))):

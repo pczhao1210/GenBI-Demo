@@ -99,8 +99,9 @@ class LLMClient:
                     timeout=30, max_retries=0,
                 )
             elif section in ("openai", "custom"):
-                base_url = config.get("base_url", "").removesuffix("/chat/completions")
+                base_url = config.get("base_url", "").rstrip("/").removesuffix("/chat/completions")
                 client = openai.OpenAI(api_key=config.get("api_key"), base_url=base_url or None,
+                                       organization=config.get("organization") or None,
                                        timeout=30, max_retries=0)
             else:
                 raise LLMError(f"Unsupported provider: {self.provider}")

@@ -84,6 +84,14 @@ class ToolInvoker:
             if self.active_sources is not None and source["datasource_id"] not in {
                     self.config.resolve_datasource(identifier)["datasource_id"] for identifier in self.active_sources}:
                 raise ValueError("Tool datasource is outside the frozen active set")
+            if getattr(self.config, "snapshot", {}).get("profile") or getattr(self.config, "snapshot", {}).get("resource_scoped"):
+                from utils.sql_utils import validate_profile_sql
+                if capability == "database.query":
+                    validate_profile_sql(arguments["sql"], source)
+                elif arguments.get("table") and arguments["table"] not in source["schema"]["tables"]:
+                    raise ValueError("Table is outside the Profile")
+                if capability == "database.metadata" and definition["backend"] != "local":
+                    raise ValueError("Profile metadata requires local:database.metadata for the frozen table scope")
         if capability.startswith("compute."):
             refs = arguments.get("inputs")
             if not isinstance(refs, list) or any(type(ref) is not int for ref in refs):
@@ -154,6 +162,14 @@ class ToolInvoker:
             return payload
         if capability.startswith("database."):
             source = self.config.resolve_datasource(arguments["datasource_id"])
+            if capability == "database.metadata" and (
+                    getattr(self.config, "snapshot", {}).get("profile")
+                    or getattr(self.config, "snapshot", {}).get("resource_scoped")):
+                table = arguments.get("table")
+                if table:
+                    info = source["schema"]["tables"][table]
+                    return {"columns": info.get("columns", []) if isinstance(info, dict) else info}
+                return {"tables": list(source["schema"]["tables"])}
             query_timeout = source["config"].get("query_timeout", 240)
             if (isinstance(query_timeout, bool) or not isinstance(query_timeout, (int, float))
                     or query_timeout <= 0):

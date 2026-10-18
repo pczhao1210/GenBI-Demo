@@ -33,7 +33,7 @@ class RunService:
         self.service_factory = service_factory
 
     def submit(self, question, database="mysql", session_id=None, submission_id=None,
-               plan=None, parent_run_id=None, reuse=None, datasource_ids=None):
+               plan=None, parent_run_id=None, reuse=None, datasource_ids=None, profile_id=None):
         if not question.strip():
             raise ValueError("Question cannot be empty")
         if plan is not None:
@@ -41,7 +41,17 @@ class RunService:
         run_id = uuid4().hex
         requested_session = session_id
         session_id = session_id or uuid4().hex
-        snapshot = snapshot_config(self.config)
+        snapshot = snapshot_config(self.config, profile_id)
+        if profile_id is not None:
+            database = FrozenConfig(snapshot).resolve_datasource(database)["datasource_id"]
+            selected = datasource_ids if datasource_ids is not None else list(snapshot["sources"])
+            datasource_ids = [FrozenConfig(snapshot).resolve_datasource(key)["datasource_id"] for key in selected]
+            if database not in datasource_ids:
+                raise ValueError("Profile primary datasource must be in the active set")
+        if requested_session:
+            previous_runs = self.store.history(requested_session)
+            if any(run.get("profile_id") != profile_id for run in previous_runs):
+                raise ValueError("A conversation cannot span different Profiles; start a new conversation")
         state = {"run_id": run_id, "session_id": session_id, "parent_run_id": parent_run_id,
                  "question": question, "database": database, "status": "QUEUED",
                  "phase": "UNDERSTAND", "plan": plan, "plan_version": 1, "steps": reuse or {},
@@ -51,6 +61,8 @@ class RunService:
                             "model_calls": 32, "replans": 2, "stagnation": 2},
                  "source_version": fingerprint(snapshot), "cancel_capability": "cooperative"}
         state.update(queued_at=state["created_at"], queue_seconds=0, waiting_seconds=0)
+        state["profile_id"] = profile_id
+        state["profile_name"] = snapshot.get("profile", {}).get("name")
         identifiers = datasource_ids or [database]
         state["datasource_ids"] = list(dict.fromkeys(identifiers))
         previous = next((run for run in self.store.history(session_id)
@@ -64,6 +76,8 @@ class RunService:
         private = {"snapshot": snapshot,
                    "submission_input": {"question": question, "database": database, "plan": plan,
                                         "datasource_ids": state["datasource_ids"], "session_id": requested_session}}
+        if profile_id is not None:
+            private["submission_input"]["profile_id"] = profile_id
         state, created = self.store.create(state, private, submission_id or uuid4().hex)
         if created:
             self.store.update(run_id, lambda s: None, "submitted")
@@ -185,7 +199,7 @@ class RunService:
         previous = self.store.get(run_id)
         if previous["status"] not in TERMINAL:
             raise ValueError("Only terminal runs can be retried")
-        current = snapshot_config(self.config)
+        current = snapshot_config(self.config, previous.get("profile_id"))
         original = self.store.get(run_id, private=True)["snapshot"]
         reuse, payloads = {}, {}
         if not refresh and previous["plan"]:
@@ -203,7 +217,7 @@ class RunService:
                     payloads[key] = result
         result = self.submit(previous["question"], previous["database"], previous["session_id"],
                              plan=previous["plan"], parent_run_id=run_id,
-                             datasource_ids=previous.get("datasource_ids"))
+                             datasource_ids=previous.get("datasource_ids"), profile_id=previous.get("profile_id"))
         for key in reuse:
             artifact = self.store.put_artifact(result["run_id"], payloads[key])
             reuse[key]["artifact_id"] = artifact

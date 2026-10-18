@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.routers import chat, database, mcp, llm, runs, semantics, tools
+from backend.routers import chat, database, mcp, llm, runs, semantics, tools, profiles
 from utils.resources import BusyError
 
 app = FastAPI(
@@ -31,6 +31,7 @@ app.include_router(llm.router, prefix="/api/llm", tags=["LLM"])
 app.include_router(runs.router, prefix="/api/runs", tags=["Runs"])
 app.include_router(semantics.router, prefix="/api/semantics", tags=["Semantics"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Tools"])
+app.include_router(profiles.router, prefix="/api/profiles", tags=["Profiles"])
 
 
 @app.exception_handler(ValueError)

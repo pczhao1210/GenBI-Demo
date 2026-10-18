@@ -10,6 +10,37 @@ from utils.understanding import resolve_time, understand
 
 
 class SemanticTests(ConfigTestCase):
+    def test_definition_only_metric_preserves_optional_fields_as_unspecified(self):
+        ontology = {"metrics": {"kpi1": {"description": "KPI1 = A * B * C; A is price, B is quantity, C is discount."}}}
+        self.config.save_semantics(ontology)
+        self.assertEqual(self.config.load_semantics(), ontology)
+        for replacement in (
+            {"description": " "}, {"description": None}, {"aggregation": 123},
+            {"allowed_dimensions": "region"}, {"mappings": []},
+            {"mappings": {"legacy-mysql": {"table": "mysql_orders", "columns": [{}]}}},
+        ):
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                self.config.save_semantics({"metrics": {"kpi1": {**ontology["metrics"]["kpi1"], **replacement}}})
+
+    def test_empty_method_steps_are_allowed_only_before_validation(self):
+        from utils.analysis import validate_methods
+        method = {"id": "simple", "title": "Compare", "description": "Compare two periods", "version": 1,
+                  "status": "draft", "preconditions": {}, "required_capabilities": [], "template": {"steps": []}}
+        validate_methods({"methods": [method]})
+        method.update(status="validated", validation={"reviewer": "QA", "passed": True, "fixture_ids": ["fixture"]})
+        with self.assertRaisesRegex(ValueError, "non-empty steps"):
+            validate_methods({"methods": [method]})
+
+    def test_configuration_examples_pass_validators_with_or_without_datasources(self):
+        from utils.analysis import validate_methods
+        from utils.semantics import configuration_examples, validate_ontology, validate_knowledge
+        for sources in ({}, self.config.load_datasources()):
+            examples = configuration_examples(sources)
+            validate_ontology(examples["ontology"], sources)
+            validate_knowledge(examples["knowledge"])
+            validate_methods(examples["methods"])
+            self.assertEqual(examples["methods"]["methods"][0]["status"], "draft")
+
     def extraction(self, question, patches, followup=False, context=None, ontology=None):
         model = Mock(return_value=json.dumps({"intent": "query", "followup": followup, "slots": patches,
                                              "clarification": None}))
@@ -52,7 +83,7 @@ class SemanticTests(ConfigTestCase):
         ontology = {"metrics": {"sales": {"allowed_dimensions": [], "mappings": {}}}}
         result, _ = self.extraction("sales", {"metrics": {"value": ["sales"], "span": [0, 5]}},
                                     ontology=ontology)
-        self.assertIn("not computable", result["clarification"])
+        self.assertIn("needs a saved schema", result["clarification"])
         result, _ = self.extraction("that", {"result_reference": {"value": ["1", "2"], "span": [0, 4]}})
         self.assertIn("Multiple", result["clarification"])
 

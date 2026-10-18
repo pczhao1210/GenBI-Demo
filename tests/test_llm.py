@@ -16,6 +16,18 @@ def response(status=200, content="SELECT 1"):
 
 
 class LLMTests(unittest.TestCase):
+    @patch("utils.llm_client.openai.OpenAI")
+    def test_model_discovery_uses_connection_without_requiring_selected_model(self, factory):
+        config = self.config()
+        config["openai"].pop("model")
+        config["openai"]["base_url"] += "/chat/completions/"
+        config["openai"]["organization"] = "test-organization"
+        factory.return_value.models.list.return_value = [Mock(id="fast-model"), Mock(id="strong-model")]
+        self.assertEqual(LLMClient(config).list_models(), ["fast-model", "strong-model"])
+        self.assertEqual(factory.call_args.kwargs["base_url"], "http://example.invalid/v1")
+        self.assertEqual(factory.call_args.kwargs["organization"], "test-organization")
+        factory.return_value.chat.completions.create.assert_not_called()
+
     def config(self, provider="openai"):
         return {"provider": provider, "timeout": {"query": 12, "analysis": 45},
                 "parameters": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 100},

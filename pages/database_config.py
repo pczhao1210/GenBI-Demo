@@ -6,14 +6,19 @@ from utils.config_manager import ConfigManager
 from utils.datasources import DatabaseAdapter, ENGINES
 from utils.i18n import t
 from utils.mcp_client import MCPClient
+from utils.profile_ui import delete_control, ui_config, visibility_editor, writing_example
 
 st.set_page_config(page_title="Data sources", page_icon="🗄️")
 st.title(t("database_config"))
-config = ConfigManager()
+config = ui_config()
 sources = config.load_datasources()
-engine = st.selectbox(t("select_database"), ENGINES)
+if "configure_engine" in st.session_state:
+    st.session_state["database_engine"] = st.session_state.pop("configure_engine")
+engine = st.selectbox(t("select_database"), ENGINES, key="database_engine")
 candidates = [key for key, value in sources.items() if value["engine"] == engine]
 selection_key = f"source_connection_{engine}"
+if st.session_state.get(selection_key) not in {None, "__new__", *candidates}:
+    st.session_state.pop(selection_key, None)
 saved_key = f"saved_source_{engine}"
 saved_id = st.session_state.pop(saved_key, None)
 if saved_id in candidates:
@@ -32,6 +37,8 @@ else:
     source = sources[selection]
 prefix = f"{source['datasource_id']}_"
 current = source["config"]
+writing_example("source", t("source_writing_example"))
+scope = visibility_editor(source, prefix + "scope", config.profile_id, new=selection == "__new__")
 
 
 def field(label, name, default="", password=False):
@@ -78,12 +85,16 @@ connection["connection_timeout"] = int(current.get("connection_timeout", 10))
 timezone = st.text_input(t("business_timezone"), value=source.get("timezone", "UTC"), key=prefix + "timezone")
 day_start = st.number_input(t("business_day_hour"), 0, 23, source.get("business_day_start", 0),
                            key=prefix + "day")
-source = {**source, "name": name, "config": connection, "timezone": timezone, "business_day_start": day_start}
+source = {**source, **scope, "name": name, "config": connection, "timezone": timezone, "business_day_start": day_start}
 adapter = DatabaseAdapter(source, MCPClient(config))
 left, right = st.columns(2)
 try:
     if left.button(t("test_source")):
-        st.json(adapter.metadata())
+        metadata = adapter.metadata()
+        if selection != "__new__":
+            metadata["tables"] = [table for table in metadata.get("tables", []) if config.table_visible(
+                source["datasource_id"], table["name"] if isinstance(table, dict) else table)]
+        st.json(metadata)
         st.success(t("connection_test_success"))
     if right.button(t("save_source"), type="primary"):
         config.save_datasource(source)
@@ -96,3 +107,5 @@ try:
         st.json(adapter.diagnostics())
 except (ValueError, RuntimeError) as exc:
     st.error(str(exc))
+if selection != "__new__":
+    delete_control(prefix, lambda: config.delete_datasource(source["datasource_id"]))

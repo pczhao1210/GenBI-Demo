@@ -45,10 +45,14 @@ config/*.lock
 config/datasources.json
 config/semantics.json
 config/knowledge.json
+config/query_knowledge.json
 config/model_roles.json
 config/methods.json
 config/tools_config.json
 config/tool_discovery.json
+config/profiles.json
+config/workflow_config.json
+config/model_catalog.json
 !config/example_*.json
 
 # Logs

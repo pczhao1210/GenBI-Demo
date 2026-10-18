@@ -3,13 +3,29 @@ from copy import deepcopy
 from utils.tool_catalog import version_of
 
 
-def snapshot_config(config):
+def snapshot_config(config, profile_id=None, *, catalog=False):
     sources = config.load_datasources()
-    return {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
+    snapshot = {"databases": config.load_database_config(), "schemas": config.load_schema_config(),
             "llm": config.load_llm_config(), "mcp": config.load_mcp_config(), "sources": sources,
             "semantics": config.load_semantics(), "knowledge": config.load_knowledge(),
             "model_roles": config.load_model_roles(), "methods": config.load_methods(),
-            "tools": config.load_tools_config(), "tool_discovery": config.load_tool_discovery()}
+            "tools": config.load_tools_config(), "tool_discovery": config.load_tool_discovery(),
+            "workflow": config.load_workflow_config(), "prompt_defaults": config.load_prompt_defaults(),
+            "query_knowledge": config.load_query_knowledge()}
+    if profile_id is not None:
+        from utils.profiles import scope_snapshot
+        profile = config.load_profiles().get(profile_id)
+        if profile is None:
+            raise ValueError(f"Unknown Profile: {profile_id}")
+        return scope_snapshot(snapshot, profile)
+    if isinstance(config, FrozenConfig) and config.snapshot.get("profile"):
+        snapshot["profile"] = deepcopy(config.snapshot["profile"])
+        snapshot["resource_scoped"] = True
+        return snapshot
+    if catalog:
+        return snapshot
+    from utils.profiles import shared_snapshot
+    return shared_snapshot(snapshot)
 
 
 class FrozenConfig:
@@ -47,12 +63,22 @@ class FrozenConfig:
     def load_methods(self):
         return deepcopy(self.snapshot["methods"])
 
+    def load_query_knowledge(self):
+        return deepcopy(self.snapshot.get("query_knowledge", {}))
+
     def load_tools_config(self):
         from utils.tool_catalog import default_tools_config
         return deepcopy(self.snapshot.get("tools", default_tools_config()))
 
     def load_tool_discovery(self):
         return deepcopy(self.snapshot.get("tool_discovery", {}))
+
+    def load_workflow_config(self):
+        return deepcopy(self.snapshot.get("workflow", {}))
+
+    def load_prompt_defaults(self):
+        from utils.prompts import DEFAULT_PROMPTS
+        return deepcopy(self.snapshot.get("prompt_defaults", DEFAULT_PROMPTS))
 
 
 def source_fingerprint(source):
@@ -63,14 +89,20 @@ def source_fingerprint(source):
 def step_compatible(step, old, new):
     from utils.tool_catalog import ToolCatalog
     kind = step["step_type"]
+    if (old.get("profile") != new.get("profile") or old.get("workflow", {}) != new.get("workflow", {})
+            or old.get("resource_scoped", False) != new.get("resource_scoped", False)
+            or old.get("query_knowledge", {}) != new.get("query_knowledge", {})
+            or old.get("prompt_defaults") != new.get("prompt_defaults")):
+        return False
     if kind == "sql_query":
         identifier = step.get("datasource_id")
         if not identifier or identifier not in old["sources"] or identifier not in new["sources"]:
             return False
         if source_fingerprint(old["sources"][identifier]) != source_fingerprint(new["sources"][identifier]):
             return False
-        if old["semantics"] != new["semantics"]:
-            return False
+    if kind in ("sql_query", "llm_analysis") and any(
+            old.get(field) != new.get(field) for field in ("semantics", "knowledge", "methods")):
+        return False
     if kind in ("sql_query", "llm_analysis") and (
             old["llm"] != new["llm"] or old["model_roles"] != new["model_roles"]):
         return False

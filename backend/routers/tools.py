@@ -7,6 +7,7 @@ from utils.model_router import ToolBudget
 from utils.tool_catalog import ToolCatalog
 from utils.tool_execution import ToolInvoker
 from utils.tool_management import TEMPLATES, ToolManagement
+from utils.run_context import FrozenConfig, snapshot_config
 
 router = APIRouter()
 
@@ -18,6 +19,11 @@ class ServerSettings(BaseModel):
 
 class Enable(BaseModel):
     enabled: bool
+
+
+class Connect(BaseModel):
+    settings: dict[str, Any]
+    confirmed: bool = False
 
 
 class Probe(BaseModel):
@@ -37,6 +43,7 @@ class Trial(BaseModel):
     tool_id: str
     arguments: dict[str, Any]
     datasource_ids: list[str] | None = None
+    profile_id: str | None = None
 
 
 @router.get("")
@@ -61,6 +68,13 @@ def save_server(server_id: str, request: ServerSettings):
 def discover(server_id: str, request: Probe):
     info = ToolManagement().discover(server_id, request.confirmed)
     return {"name": info.get("name"), "tool_count": len(info.get("tools", []))}
+
+
+@router.post("/servers/{server_id}/connect")
+def connect(server_id: str, request: Connect):
+    info = ToolManagement().connect_server(server_id, request.settings, request.confirmed)
+    return {"server_id": server_id, "enabled": True, "tools": info.get("tools", []),
+            "tools_enabled": False}
 
 
 @router.post("/servers/{server_id}/enabled")
@@ -95,7 +109,8 @@ def trial(request: Trial):
     if definition["output_kind"] == "interpretation":
         raise ValueError("Reasoning tools are restricted to bounded planning, not diagnostic evidence")
     try:
-        result = ToolInvoker(management.config, management.client, budget, request.datasource_ids).call(
+        scoped = FrozenConfig(snapshot_config(management.config, request.profile_id))
+        result = ToolInvoker(scoped, management.client, budget, request.datasource_ids).call(
             request.capability, request.arguments, request.tool_id)
         return {"result": result, "calls": budget.records}
     finally:

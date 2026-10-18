@@ -29,3 +29,26 @@ def validate_readonly_sql(sql: str, database_type: str = "mysql") -> str:
     if any(isinstance(node, forbidden) for node in statements[0].walk()):
         raise ValueError("SQL contains a non-read-only operation")
     return sql
+
+
+def validate_profile_sql(sql, source):
+    """Resolve CTE scopes before checking physical table identities."""
+    from sqlglot.optimizer.scope import traverse_scope
+
+    dialect = {"mysql": "mysql", "athena": "presto", "postgresql": "postgres", "mssql": "tsql"}[source["engine"]]
+    sql = validate_readonly_sql(sql, source["engine"])
+    expression = sqlglot.parse_one(sql, read=dialect)
+    allowed = set(source["schema"].get("tables", {}))
+    config = source["config"]
+    default_db = (config.get("schema") or ("public" if source["engine"] == "postgresql" else "dbo")
+                  if source["engine"] in ("postgresql", "mssql") else config.get("database"))
+    default_catalog = config.get("catalog") if source["engine"] == "athena" else config.get("database")
+    for scope in traverse_scope(expression):
+        for _, table in scope.selected_sources.values():
+            if not isinstance(table, exp.Table):
+                continue
+            if (not isinstance(table.this, exp.Identifier) or table.name not in allowed
+                    or table.db and table.db != default_db
+                    or table.catalog and table.catalog != default_catalog):
+                raise ValueError(f"SQL table is outside the Profile: {table.sql(dialect=dialect)}")
+    return sql

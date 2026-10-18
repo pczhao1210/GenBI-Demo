@@ -12,6 +12,9 @@ from utils.semantics import KnowledgeIndex
 from utils.tool_catalog import CATEGORIES, ToolCatalog
 from utils.tool_execution import ToolInvoker
 from utils.tool_management import TEMPLATES, ToolManagement
+from utils.datasources import DatabaseAdapter, ENGINES
+from utils.profile_ui import ui_config
+from utils.run_context import FrozenConfig, snapshot_config
 
 
 def category_label(identifier, settings):
@@ -23,17 +26,49 @@ def render_tools():
     st.set_page_config(page_title="Tools", page_icon="🛠️", layout="wide")
     st.title(t("tools_title"))
     st.info(t("tools_protocol_help"))
-    config = ConfigManager()
+    config = ui_config()
     client = MCPClient(config)
     management = ToolManagement(config, client)
     settings = config.load_tools_config()
     catalog = ToolCatalog(config)
     servers = config.load_mcp_config()
-    kind = st.selectbox(t("tools_filter"), ["all", "local", "mcp"],
-                        format_func=lambda value: t(f"tools_{value}"))
-    category = st.selectbox(t("tools_category"), ["all", *settings["categories"]],
-                            format_func=lambda value: t("tools_all") if value == "all"
-                            else category_label(value, settings))
+    builtin, mcp_tab = st.tabs([t("tools_local"), t("tools_mcp")])
+    with builtin:
+        category = _category_filter(settings, "local")
+        if category in ("all", "database"):
+            _connectors(config, servers, management)
+        if category in ("all", "knowledge"):
+            st.page_link("pages/semantics.py", label=t("semantics_title"))
+            st.caption(f"{t('index_status')}: {len(KnowledgeIndex(config.load_knowledge()).chunks)}")
+        _tool_groups([tool for tool in catalog.list() if tool["backend"] != "mcp"], category, management, settings)
+        with st.expander(t("builtin_adapters")):
+            if st.button(t("tools_scan_builtin")):
+                for name, info in client.discover_available_servers().items():
+                    if name not in servers:
+                        servers[name] = {"type": "stdio", "command": sys.executable,
+                                         "args": [f"mcp_servers/{name}_server.py"], "status": "inactive",
+                                         "description": info.get("description", ""), "capabilities": []}
+                config.save_mcp_config(servers)
+                st.rerun()
+            for name, server in servers.items():
+                if server.get("protocol") != "mcp" and name not in ("mysql", "athena"):
+                    _server_card(name, server, management)
+    with mcp_tab:
+        category = _category_filter(settings, "mcp")
+        notice = st.session_state.pop("mcp_connected", None)
+        if notice is not None:
+            st.success(f"{t('mcp_connected')}: {notice}")
+        _add_server(management, settings, category)
+        for name, server in servers.items():
+            if server.get("protocol") != "mcp":
+                continue
+            tools = [tool for tool in catalog.list() if tool.get("server_id") == name]
+            categories = set(server.get("categories", [])) | {c for tool in tools for c in tool["categories"]}
+            if category != "all" and category not in categories:
+                continue
+            st.subheader(name)
+            _server_card(name, server, management)
+            _tool_groups(tools, category, management, settings)
 
     with st.expander(t("tools_categories")):
         category_id = st.text_input(t("tools_stable_id"), key="category_id")
@@ -58,39 +93,57 @@ def render_tools():
             except (ValueError, KeyError) as exc:
                 st.error(str(exc))
 
-    if kind in ("all", "local"):
-        st.subheader(t("tools_local"))
-        st.page_link("pages/database_config.py", label=t("database_config"))
-        st.page_link("pages/semantics.py", label=t("semantics_title"))
-        index = KnowledgeIndex(config.load_knowledge())
-        st.caption(f"{t('index_status')}: {len(index.chunks)} · {index.version[:12]} · {index.cache_info()}")
-        st.caption(" · ".join(f"{source['name']} ({source['datasource_id']}, {source['engine']})"
-                              for source in config.load_datasources().values()))
-    for tool in catalog.list():
-        is_local = tool["backend"] == "local"
-        if kind == "local" and not is_local or kind == "mcp" and is_local:
-            continue
-        if category != "all" and category not in tool["categories"]:
-            continue
-        _tool_card(tool, management, settings)
 
-    if kind == "local":
-        return
-    st.subheader(t("mcp_server_list"))
-    if st.button(t("tools_scan_builtin")):
-        for name, info in client.discover_available_servers().items():
-            if name not in servers:
-                servers[name] = {"type": "stdio", "command": sys.executable,
-                                 "args": [f"mcp_servers/{name}_server.py"], "status": "inactive",
-                                 "description": info.get("description", ""), "capabilities": []}
-        config.save_mcp_config(servers)
-        st.rerun()
-    with st.expander(t("add_mcp_server")):
+def _category_filter(settings, kind):
+    return st.selectbox(t("tools_category"), ["all", *settings["categories"]], key=f"category_{kind}",
+                         format_func=lambda value: t("tools_all") if value == "all" else category_label(value, settings))
+
+
+def _connectors(config, servers, management):
+    st.subheader(t("database_connectors"))
+    st.caption(t("configured_not_connected"))
+    sources = config.load_datasources()
+    for engine in ENGINES:
+        with st.container(border=True):
+            st.write({"mysql": "MySQL", "athena": "AWS Athena", "postgresql": "PostgreSQL (PGSQL)",
+                      "mssql": "Microsoft SQL Server (MSSQL)"}[engine])
+            connections = [source for source in sources.values() if source["engine"] == engine]
+            st.caption(", ".join(source["name"] for source in connections) or t("needs_configuration"))
+            st.caption(t("native_connector") if engine in ("postgresql", "mssql") else t("rpc_connector"))
+            left, right = st.columns(2)
+            if left.button(t("configure_now"), key=f"configure_{engine}"):
+                st.session_state["configure_engine"] = engine
+                st.switch_page("pages/database_config.py")
+            if right.button(t("connector_diagnostics"), key=f"diagnostics_{engine}"):
+                try:
+                    source = {"engine": engine, "config": connections[0]["config"] if connections else {}}
+                    st.json(DatabaseAdapter(source).diagnostics())
+                except RuntimeError as exc:
+                    st.error(str(exc))
+            if engine in servers and servers[engine].get("protocol") != "mcp":
+                _server_card(engine, servers[engine], management)
+
+
+def _tool_groups(tools, category, management, settings):
+    visible = [tool for tool in tools if category == "all" or category in tool["categories"]]
+    groups = {}
+    for tool in visible:
+        group = category if category != "all" else next(iter(tool["categories"]), "uncategorized")
+        groups.setdefault(group, []).append(tool)
+    for group, tools in groups.items():
+        st.subheader(category_label(group, settings) if group in settings["categories"] else t("uncategorized"))
+        for tool in tools:
+            _tool_card(tool, management, settings)
+    if not visible:
+        st.info(t("tools_empty_category"))
+
+def _add_server(management, settings, category):
+    with st.expander(t("add_mcp_server"), expanded=True):
         template = st.selectbox(t("tools_template"), list(TEMPLATES))
         defaults = deepcopy(TEMPLATES[template])
         server_id = st.text_input(t("server_name"), key=f"server_name_{template}")
         categories = st.multiselect(t("tools_category"), list(settings["categories"]),
-                                   default=([category] if category != "all" else defaults["categories"]),
+                                   default=([category] if category != "all" else defaults["categories"] or ["external_api"]),
                                    key=f"server_categories_{template}",
                                    format_func=lambda value: category_label(value, settings))
         when = st.text_input(t("tools_when"), defaults["when_to_use"], key=f"when_{template}")
@@ -102,9 +155,14 @@ def render_tools():
         else:
             url = st.text_input(t("tools_endpoint"), defaults["url"], key=f"url_{template}")
             headers = st.text_area(t("tools_header_refs"), "{}", key=f"headers_{template}")
-        mapping = st.text_area(t("tools_capability_mapping"), json.dumps(defaults["capabilities"]),
-                               key=f"mapping_{template}")
-        if st.button(t("tools_save_disabled")):
+        with st.expander(t("tools_optional_mapping")):
+            mapping = st.text_area(t("tools_capability_mapping"), json.dumps(defaults["capabilities"]),
+                                   key=f"mapping_{template}")
+            st.caption(t("tools_automatic_capabilities"))
+        confirmed = st.checkbox(t("tools_probe_consent"), key=f"connect_consent_{template}")
+        connect = st.button(t("mcp_connect_discover"), type="primary", key=f"connect_{template}", disabled=not confirmed)
+        save = st.button(t("tools_save_disabled"), key=f"save_new_{template}")
+        if connect or save:
             try:
                 defaults.update(categories=categories, when_to_use=when, capabilities=json.loads(mapping))
                 if defaults["type"] == "stdio":
@@ -113,69 +171,85 @@ def render_tools():
                         defaults["cwd"] = cwd
                 else:
                     defaults.update(url=url, header_refs=json.loads(headers))
-                management.save_server(server_id, defaults)
-                st.success(t("config_saved"))
+                if connect:
+                    info = management.connect_server(server_id, defaults, confirmed=confirmed)
+                    st.session_state["mcp_connected"] = len(info.get("tools", []))
+                else:
+                    management.save_server(server_id, defaults)
                 st.rerun()
             except (ValueError, RuntimeError) as exc:
                 st.error(str(exc))
 
-    for name, server in servers.items():
-        if category != "all" and category not in server.get("categories", []):
-            continue
-        with st.container(border=True):
-            protocol = "MCP" if server.get("protocol") == "mcp" else "legacy RPC"
-            st.write(f"{name} · {protocol} · {server.get('type')} · {server.get('status')}")
-            st.caption(t("tools_probe_not_connection"))
-            st.caption(f"{t('tools_affected')}: {', '.join(server.get('capabilities', []))}")
-            confirmed = st.checkbox(t("tools_probe_consent"), key=f"confirm_probe_{name}")
-            if st.button(t("tools_check_status"), key=f"check_{name}"):
-                try:
-                    info = management.discover(name, confirmed=confirmed)
-                    st.session_state[f"probe_{name}"] = {
-                        key: value for key, value in info.items() if key != "tools"}
-                    st.success(t("tools_discovery_ok"))
-                    st.rerun()
-                except (ValueError, RuntimeError) as exc:
-                    st.error(str(exc))
-            if st.session_state.get(f"probe_{name}"):
-                st.json(st.session_state[f"probe_{name}"])
-            for suffix, label, enabled in (("start", "enable_on_demand", True), ("stop", "disable_server", False)):
-                if st.button(t(label), key=f"{suffix}_{name}"):
-                    try:
-                        management.set_server_enabled(name, enabled)
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
-            with st.expander(t("tools_edit_server")):
-                editable = {key: value for key, value in server.items()
-                            if key not in ("status", "env", "headers", "auth")}
-                raw = st.text_area(t("tools_server_json"), json.dumps(editable, ensure_ascii=False, indent=2),
-                                   key=f"server_edit_{name}")
-                if st.button(t("tools_save_disabled"), key=f"save_server_{name}"):
-                    try:
-                        management.save_server(name, json.loads(raw), replace=True)
-                        st.rerun()
-                    except (ValueError, RuntimeError) as exc:
-                        st.error(str(exc))
-            consent = st.checkbox(t("tools_delete_consent"), key=f"delete_consent_{name}")
-            if st.button(t("delete"), key=f"delete_{name}", disabled=not consent):
-                management.delete_server(name)
+
+def _server_card(name, server, management):
+    with st.expander(f"{name} · {server.get('status')}", expanded=False):
+        protocol = "MCP" if server.get("protocol") == "mcp" else "legacy RPC"
+        st.write(f"{name} · {protocol} · {server.get('type')} · {server.get('status')}")
+        st.caption(t("tools_probe_not_connection"))
+        st.caption(f"{t('tools_affected')}: {', '.join(server.get('capabilities', []))}")
+        confirmed = st.checkbox(t("tools_probe_consent"), key=f"confirm_probe_{name}")
+        if st.button(t("tools_check_status"), key=f"check_{name}"):
+            try:
+                info = management.discover(name, confirmed=confirmed)
+                st.session_state[f"probe_{name}"] = {
+                    key: value for key, value in info.items() if key != "tools"}
+                st.success(t("tools_discovery_ok"))
                 st.rerun()
+            except (ValueError, RuntimeError) as exc:
+                st.error(str(exc))
+        if st.session_state.get(f"probe_{name}"):
+            st.json(st.session_state[f"probe_{name}"])
+        for suffix, label, enabled in (("start", "enable_on_demand", True), ("stop", "disable_server", False)):
+            if st.button(t(label), key=f"{suffix}_{name}"):
+                try:
+                    management.set_server_enabled(name, enabled)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        if server.get("protocol") == "mcp":
+            _edit_server(name, server, management)
+        consent = st.checkbox(t("tools_delete_consent"), key=f"delete_consent_{name}")
+        if st.button(t("delete"), key=f"delete_{name}", disabled=not consent):
+            management.delete_server(name)
+            st.rerun()
+
+
+def _edit_server(name, server, management):
+    with st.expander(t("tools_edit_server")):
+        editable = {key: value for key, value in server.items() if key not in ("status", "env", "headers", "auth")}
+        raw = st.text_area(t("tools_server_json"), json.dumps(editable, ensure_ascii=False, indent=2),
+                           key=f"server_edit_{name}")
+        if st.button(t("tools_save_disabled"), key=f"save_server_{name}"):
+            try:
+                management.save_server(name, json.loads(raw), replace=True)
+                st.rerun()
+            except (ValueError, RuntimeError) as exc:
+                st.error(str(exc))
 
 
 def _tool_card(tool, management, settings):
     tool_id = tool["tool_id"]
     with st.expander(f"{tool_id} · {t('configured') if tool['enabled'] else t('tools_disabled')}"):
+        enabled = st.toggle(t("tools_enabled"), tool["enabled"], key=f"enabled_{tool_id}")
+        if enabled != tool["enabled"]:
+            try:
+                management.update_tool(tool_id, {"enabled": enabled})
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
         st.write(tool["description"])
-        st.caption(f"{tool['backend']} · {', '.join(tool['categories'])} · {', '.join(tool['capabilities'])}")
+        if not tool["policy"]["read_only"] and tool["output_kind"] != "interpretation":
+            st.warning(t("tool_readonly_required"))
+        st.caption(f"{tool['backend']} · " + ", ".join(category_label(c, settings) for c in tool["categories"])
+                   + f" · {', '.join(tool['capabilities'])}")
         if not tool["available"]:
             st.warning(tool["unavailable_reason"])
         if tool.get("discovered_at"):
             st.caption(tool["discovered_at"])
-        st.json({"input_schema": tool["input_schema"], "output_kind": tool["output_kind"],
-                 "policy": tool["policy"], "definition_version": tool["definition_version"]})
+        if st.checkbox(t("debug_details"), key=f"schema_{tool_id}"):
+            st.json({"input_schema": tool["input_schema"], "output_kind": tool["output_kind"],
+                     "policy": tool["policy"], "definition_version": tool["definition_version"]})
         with st.form(f"tool_form_{tool_id}"):
-            enabled = st.checkbox(t("tools_enabled"), tool["enabled"], key=f"enabled_{tool_id}")
             categories = st.multiselect(t("tools_category"), list(settings["categories"]),
                                        default=[c for c in tool["categories"] if c in settings["categories"]],
                                        format_func=lambda value: category_label(value, settings))
@@ -221,7 +295,8 @@ def _tool_card(tool, management, settings):
         if st.button(t("tools_trial"), key=f"trial_{tool_id}"):
             budget = ToolBudget(max_calls=4)
             try:
-                invoker = ToolInvoker(management.config, management.client, budget)
+                scoped = FrozenConfig(snapshot_config(management.config.base, management.config.profile_id))
+                invoker = ToolInvoker(scoped, management.client, budget)
                 result = invoker.call(tool["capabilities"][0], json.loads(arguments), tool_id)
                 st.json(result)
             except (ValueError, RuntimeError) as exc:

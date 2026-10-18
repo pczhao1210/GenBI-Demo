@@ -206,7 +206,7 @@ class APITests(ConfigTestCase):
         self.client = TestClient(app)
         for target, value in (
             ("backend.routers.chat.BIService", self.service),
-            ("backend.routers.database.BIService", self.service),
+            ("backend.routers.database.ConfigManager", self.config),
             ("backend.routers.database.MCPClient", self.mcp),
             ("backend.routers.llm.BIService", self.service),
         ):

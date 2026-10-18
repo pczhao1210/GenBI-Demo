@@ -14,6 +14,50 @@ import json
 
 
 class CatalogTests(ConfigTestCase):
+    def test_connect_discovery_is_explicit_and_tools_remain_disabled_until_confirmed(self):
+        from copy import deepcopy
+        settings = deepcopy(TEMPLATES["http"])
+        settings.update(url="http://example.invalid/mcp", categories=["external_api"])
+        management = ToolManagement(self.config, self.mcp)
+        self.mcp.get_server_info.return_value = {"tools": [
+            {"name": "lookup", "description": "Lookup a record", "inputSchema": {"type": "object"},
+             "annotations": {"readOnlyHint": True}}]}
+        with self.assertRaises(ValueError):
+            management.connect_server("new", settings)
+        self.assertNotIn("new", self.config.load_mcp_config())
+        self.mcp.get_server_info.assert_not_called()
+        management.connect_server("new", settings, confirmed=True)
+        catalog = ToolCatalog(self.config)
+        identity = "mcp:new:lookup"
+        tool = catalog.entries[identity]
+        self.assertFalse(tool["enabled"])
+        self.assertTrue(tool["available"])
+        self.assertEqual(tool["capabilities"], ["mcp.new.lookup"])
+        management.update_tool(identity, {"enabled": True})
+        self.mcp.call_mcp_server.return_value = {"result": {"value": "lookup-value"}}
+        result = ToolInvoker(self.config, self.mcp, ToolBudget()).call("mcp.new.lookup", {}, identity)
+        self.assertEqual(result["value"], "lookup-value")
+        management.update_tool(identity, {"enabled": False})
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            ToolInvoker(self.config, self.mcp, ToolBudget()).call("mcp.new.lookup", {}, identity)
+        self.mcp.call_mcp_server.assert_called_once()
+
+    def test_failed_one_click_discovery_is_disabled_and_reports_error(self):
+        from copy import deepcopy
+        settings = deepcopy(TEMPLATES["http"])
+        settings["url"] = "http://example.invalid/mcp"
+        self.mcp.get_server_info.return_value = {"error": "Handshake failed"}
+        with self.assertRaisesRegex(RuntimeError, "saved as disabled.*Handshake failed"):
+            ToolManagement(self.config, self.mcp).connect_server("broken", settings, confirmed=True)
+        self.assertEqual(self.config.load_mcp_config()["broken"]["status"], "inactive")
+        self.assertNotIn("broken", self.config.load_tool_discovery().get("servers", {}))
+
+    def test_malformed_tool_schema_discovery_fails_explicitly(self):
+        settings = {**TEMPLATES["http"], "url": "http://example.invalid/mcp"}
+        self.mcp.get_server_info.return_value = {"tools": [{"name": "broken"}]}
+        with self.assertRaisesRegex(RuntimeError, "inputSchema"):
+            ToolManagement(self.config, self.mcp).connect_server("broken", settings, confirmed=True)
+
     def discover(self, server="fixture", mapping=None, tools=None):
         servers = self.config.load_mcp_config()
         servers[server] = {"protocol": "mcp", "type": "streamable_http",

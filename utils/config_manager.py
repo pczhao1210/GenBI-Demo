@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from filelock import FileLock
+from utils.resource_scope import can_reference, resource_write
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -190,12 +191,20 @@ class ConfigManager:
         from utils.datasources import resolve_source
         return resolve_source(self.load_datasources(), identifier)
 
+    @resource_write
     def save_datasource(self, source):
         from utils.datasources import validate_source
+        from utils.resource_scope import check_references, validate_visibility
         source = validate_source(source)
+        validate_visibility(source, self.load_profiles())
+        for scope in source["schema"].get("table_scopes", {}).values():
+            validate_visibility(scope, self.load_profiles())
+            if scope.get("visibility") == "profile" and not can_reference(scope, source):
+                raise ValueError("Private table schema must belong to its connection's Profile")
         self.load_datasources()
         with FileLock(str(self.config_dir / "datasources.json.lock")):
             catalog = self._load_config("datasources.json")
+            check_references(self, "sources", catalog["sources"], {**catalog["sources"], source["datasource_id"]: source})
             old = catalog["sources"].get(source["datasource_id"], {})
             source["config_version"] = old.get("config_version", 0) + (old.get("config") != source["config"])
             source["schema_version"] = old.get("schema_version", 0) + (old.get("schema") != source["schema"])
@@ -205,20 +214,48 @@ class ConfigManager:
             self._save_config("datasources.json", catalog)
         return source
 
+    @resource_write
+    def delete_datasource(self, identifier):
+        from utils.resource_scope import check_references
+        self.load_datasources()
+        with FileLock(str(self.config_dir / "datasources.json.lock")):
+            catalog = self._load_config("datasources.json")
+            if identifier not in catalog["sources"]:
+                raise ValueError(f"Unknown datasource: {identifier}")
+            remaining = {key: source for key, source in catalog["sources"].items() if key != identifier}
+            check_references(self, "sources", catalog["sources"], remaining)
+            catalog["sources"] = remaining
+            catalog["legacy_mapping"] = {key: value for key, value in catalog.get("legacy_mapping", {}).items()
+                                         if value != identifier}
+            self._save_config("datasources.json", catalog)
+
     def load_semantics(self):
         return self._load_config("semantics.json")
 
+    @resource_write
     def save_semantics(self, semantics):
         from utils.semantics import validate_ontology
+        from utils.resource_scope import check_references, validate_visibility
         validate_ontology(semantics, self.load_datasources())
+        before = self.load_semantics()
+        for kind in ("entities", "metrics", "dimensions"):
+            for item in semantics.get(kind, {}).values():
+                validate_visibility(item, self.load_profiles())
+            check_references(self, kind, before.get(kind, {}), semantics.get(kind, {}))
         self._save_config("semantics.json", semantics)
 
     def load_knowledge(self):
         return self._load_config("knowledge.json")
 
+    @resource_write
     def save_knowledge(self, knowledge):
         from utils.semantics import validate_knowledge
+        from utils.resource_scope import check_references, validate_visibility
         validate_knowledge(knowledge)
+        for item in knowledge.get("documents", []):
+            validate_visibility(item, self.load_profiles())
+        check_references(self, "knowledge", {i["id"]: i for i in self.load_knowledge().get("documents", [])},
+                         {i["id"]: i for i in knowledge.get("documents", [])})
         self._save_config("knowledge.json", knowledge)
 
     def load_model_roles(self):
@@ -228,14 +265,113 @@ class ConfigManager:
         if not isinstance(roles, dict) or set(roles) - {"fast", "sql", "reasoning"}:
             raise ValueError("Model roles must be fast, sql or reasoning")
         for config in roles.values():
-            if not isinstance(config, dict) or not config.get("provider"):
+            if isinstance(config, dict) and set(config) == {"model_name"}:
+                if not isinstance(config["model_name"], str) or not config["model_name"].strip():
+                    raise ValueError("Select a model name")
+            elif not isinstance(config, dict) or not config.get("provider"):
                 raise ValueError("Each role requires a complete LLM provider configuration")
         self._save_config("model_roles.json", roles)
 
     def load_methods(self):
         return self._load_config("methods.json")
 
+    @resource_write
     def save_methods(self, library):
         from utils.analysis import validate_methods
+        from utils.resource_scope import check_references, validate_visibility
         validate_methods(library, self.load_methods())
+        for item in library.get("methods", []):
+            validate_visibility(item, self.load_profiles())
+            for case in item.get("cases", []):
+                validate_visibility(case, self.load_profiles())
+                if not can_reference(case, item):
+                    raise ValueError("Case visibility must fit its parent method; share the method or narrow the case")
+        check_references(self, "methods", {i["id"]: i for i in self.load_methods().get("methods", [])},
+                         {i["id"]: i for i in library.get("methods", [])})
         self._save_config("methods.json", library)
+
+    def load_query_knowledge(self):
+        return self._load_config("query_knowledge.json")
+
+    @resource_write
+    def save_query_knowledge(self, library):
+        from utils.query_knowledge import validate_query_knowledge
+        from utils.resource_scope import check_references
+        from utils.profiles import validate_profile
+        from utils.run_context import snapshot_config
+        validate_query_knowledge(library, self)
+        check_references(self, "queries", {i["id"]: i for i in self.load_query_knowledge().get("queries", [])},
+                         {i["id"]: i for i in library.get("queries", [])})
+        snapshot = snapshot_config(self, catalog=True)
+        snapshot["query_knowledge"] = library
+        for profile in self.load_profiles().values():
+            if profile.get("query_ids"):
+                validate_profile(profile, snapshot)
+        self._save_config("query_knowledge.json", library)
+
+    def load_profiles(self):
+        return self._load_config("profiles.json").get("profiles", {})
+
+    @resource_write
+    def save_profile(self, profile):
+        from utils.profiles import validate_profile
+        from utils.run_context import snapshot_config
+        validate_profile(profile, snapshot_config(self, catalog=True))
+        with FileLock(str(self.config_dir / "profiles.json.lock")):
+            existing = self._load_config("profiles.json")
+            existing.setdefault("profiles", {})[profile["id"]] = profile
+            self._save_config("profiles.json", existing)
+
+    @resource_write
+    def delete_profile(self, identifier):
+        resources = list(self.load_datasources().values())
+        for source in self.load_datasources().values():
+            resources.extend(source.get("schema", {}).get("table_scopes", {}).values())
+        for kind in ("entities", "metrics", "dimensions"):
+            resources.extend(self.load_semantics().get(kind, {}).values())
+        resources.extend(self.load_knowledge().get("documents", []))
+        resources.extend(self.load_query_knowledge().get("queries", []))
+        for method in self.load_methods().get("methods", []):
+            resources.extend([method, *method.get("cases", [])])
+        for settings in self.load_workflow_config().get("nodes", {}).values():
+            resources.extend(settings.get("examples", []))
+        if any(item.get("profile_id") == identifier for item in resources):
+            raise ValueError("This Profile owns private resources or examples; share or delete them first")
+        with FileLock(str(self.config_dir / "profiles.json.lock")):
+            existing = self._load_config("profiles.json")
+            if identifier not in existing.get("profiles", {}):
+                raise ValueError(f"Unknown Profile: {identifier}")
+            del existing["profiles"][identifier]
+            self._save_config("profiles.json", existing)
+
+    def load_workflow_config(self):
+        return self._load_config("workflow_config.json")
+
+    @resource_write
+    def save_workflow_config(self, settings):
+        from utils.model_router import validate_workflow_config
+        from utils.resource_scope import validate_visibility
+        validate_workflow_config(settings)
+        for node in settings.get("nodes", {}).values():
+            for item in node.get("examples", []):
+                if "visibility" in item:
+                    validate_visibility(item, self.load_profiles(), example=True)
+        self._save_config("workflow_config.json", settings)
+
+    def load_prompt_defaults(self):
+        from copy import deepcopy
+        from utils.prompts import DEFAULT_PROMPTS
+        return deepcopy(DEFAULT_PROMPTS)
+
+    def load_model_catalog(self):
+        return self._load_config("model_catalog.json")
+
+    def save_model_catalog(self, llm_config, models):
+        from utils.model_config import connection_version
+        from utils.run_store import utcnow
+        if (not isinstance(models, list) or not models
+                or any(not isinstance(name, str) or not name.strip() for name in models)):
+            raise ValueError("The provider returned no valid available models")
+        self._save_config("model_catalog.json", {
+            "connection_version": connection_version(llm_config),
+            "models": sorted(set(models)), "refreshed_at": utcnow()})

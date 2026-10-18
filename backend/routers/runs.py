@@ -17,6 +17,7 @@ class SubmitRun(BaseModel):
     submission_id: str = Field(min_length=1)
     plan: dict[str, Any] | None = None
     datasource_ids: list[str] | None = None
+    profile_id: str | None = None
 
 
 class Response(BaseModel):
@@ -62,8 +63,8 @@ def history(session_id: str | None = None):
 @router.get("/history")
 def history_page(session_id: str | None = None, before: int | None = Query(None, ge=1),
                  limit: int = Query(20, ge=1, le=100), database: str | None = None,
-                 statuses: list[str] | None = Query(None)):
-    return get_run_service().store.history_page(session_id, before, limit, database, statuses)
+                 statuses: list[str] | None = Query(None), profile_id: str | None = None):
+    return get_run_service().store.history_page(session_id, before, limit, database, statuses, profile_id)
 
 
 @router.get("/{run_id}")

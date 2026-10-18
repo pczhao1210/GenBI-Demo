@@ -132,19 +132,22 @@ class RunStore:
             rows = db.execute(query + " ORDER BY rowid DESC LIMIT 200", params).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def history_page(self, session_id=None, before=None, limit=20, database=None, statuses=None):
+    def history_page(self, session_id=None, before=None, limit=20, database=None, statuses=None, profile_id=None):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("History page limit must be from 1 to 100")
         if before is not None and (type(before) is not int or before < 1):
             raise ValueError("History cursor must be a positive integer")
         fields = ("run_id", "session_id", "question", "database", "status", "phase", "plan_version",
-                  "event_seq", "created_at", "updated_at")
+                  "event_seq", "created_at", "updated_at", "profile_id", "profile_name")
         columns = ", ".join(f"json_extract(state, '$.{field}')" for field in fields)
         filters, parameters = [], []
         for field, value in (("session_id", session_id), ("database", database)):
             if value is not None:
                 filters.append(f"json_extract(state, '$.{field}') = ?")
                 parameters.append(value)
+        if profile_id is not None:
+            filters.append("COALESCE(json_extract(state, '$.profile_id'), '') = ?")
+            parameters.append(profile_id)
         if statuses is not None:
             if (not isinstance(statuses, list) or not statuses or any(status not in {
                     "QUEUED", "RUNNING", "WAITING_INPUT", "CANCELLING", "SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"}
